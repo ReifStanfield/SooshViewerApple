@@ -1,0 +1,19 @@
+// Copy to Local.xcconfig and fill in. Local.xcconfig is gitignored.
+//
+// This is the SwiftUI equivalent of Flutter's --dart-define: build settings
+// that get baked into Info.plist, read back at runtime by AppConfig.swift.
+//
+// Note the same caveat as --dart-define: these end up inside the built .app
+// and are readable by anyone with the bundle. Fine for a personal server,
+// not a substitute for a real login flow.
+
+DISPATCHARR_URL = https:/$()/your-server.example.com
+DISPATCHARR_USER = admin
+DISPATCHARR_PASS = secret
+
+// Your Apple Developer Team ID. Find it with:
+//   security find-identity -v -p codesigning
+// then read the OU field of the matching certificate:
+//   security find-certificate -c "<that certificate name>" -p | openssl x509 -noout -subject
+// Required to run on a real device; the simulator does not need it.
+DEVELOPMENT_TEAM = ABCDE12345

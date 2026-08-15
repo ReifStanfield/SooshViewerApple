@@ -1,0 +1,146 @@
+# XcodeGen manifest. The .xcodeproj is *generated* from this file and is
+# gitignored -- so project structure lives in reviewable YAML instead of a
+# merge-hostile pbxproj blob. Regenerate after adding files:
+#
+#     cd SooshViewerApple && xcodegen generate
+#
+name: SooshViewer
+
+options:
+  bundleIdPrefix: com.soosh
+  createIntermediateGroups: true
+  # iOS/tvOS 26 so Liquid Glass (`glassEffect`, `GlassEffectContainer`,
+  # `.buttonStyle(.glass)`) is available unconditionally. This deliberately
+  # drops every device below 26 — a personal-server app can make that trade;
+  # anything shipping broadly would want availability checks instead.
+  deploymentTarget:
+    iOS: "26.0"
+    tvOS: "26.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Swift 6 language mode. Data-race safety is checked at compile time, which
+    # is why the client is an `actor` and the view model is `@MainActor`.
+    SWIFT_STRICT_CONCURRENCY: complete
+    # DEVELOPMENT_TEAM is deliberately *not* set here.
+    #
+    # A build setting written in this manifest outranks the same key in an
+    # xcconfig, so declaring it here — even as "" — would shadow whatever
+    # Config/Local.xcconfig supplies. An empty team is worse than no team: it
+    # tells automatic signing to sign with nothing, which is why Xcode reported
+    # "your team has no devices" rather than asking for a team.
+    #
+    # Set DEVELOPMENT_TEAM in Config/Local.xcconfig instead. It is gitignored, so
+    # a Team ID stays machine-local rather than being committed.
+    CODE_SIGN_STYLE: Automatic
+    # Placeholders. Config/Local.xcconfig overrides these and is gitignored --
+    # see Config/Local.xcconfig.example.
+    DISPATCHARR_URL: ""
+    DISPATCHARR_USER: ""
+    DISPATCHARR_PASS: ""
+
+# Both targets compile the same Sources/ tree. Platform differences are handled
+# in Swift with #if os(tvOS), not by forking the file list.
+targetTemplates:
+  App:
+    type: application
+    sources:
+      - path: Sources
+        # Sources/Shaders is excluded on purpose, and temporarily.
+        #
+        # Two reasons, both about Shaders.metal rather than about shaders:
+        # it does not compile yet (`solidColor` has no return expression), and
+        # building any .metal file needs a Metal toolchain that is a separate
+        # download on Xcode 26 (`xcodebuild -downloadComponent MetalToolchain`).
+        # With the file in the target, *every* build fails at CompileMetalFile —
+        # including builds that have nothing to do with it.
+        #
+        # Delete this exclude once the shader compiles and the toolchain is
+        # installed. Nothing in Swift references it yet.
+      
+    configFiles:
+      Debug: Config/Local.xcconfig
+      Release: Config/Local.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: Soosh
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # Xcode expands $(FOO) inside Info.plist values from build settings, so
+        # the xcconfig above is what actually supplies these at build time.
+        INFOPLIST_KEY_DISPATCHARR_URL: $(DISPATCHARR_URL)
+
+targets:
+  Soosh-iOS:
+    templates: [App]
+    platform: iOS
+    scheme:
+      testTargets:
+        - SooshTests
+    info:
+      path: Generated/Info-iOS.plist
+      properties:
+        CFBundleDisplayName: Soosh
+        UILaunchScreen: {}
+        # Required for Picture in Picture and for audio to survive
+        # backgrounding. Without it PiP starts and immediately stops.
+        UIBackgroundModes:
+          - audio
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        DISPATCHARR_URL: $(DISPATCHARR_URL)
+        DISPATCHARR_USER: $(DISPATCHARR_USER)
+        DISPATCHARR_PASS: $(DISPATCHARR_PASS)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.soosh.viewer
+        # Mac Catalyst, so the app has a real Mac window.
+        #
+        # Without this the only macOS destination is "Designed for iPad", which
+        # runs the iOS binary in a fixed-size window that cannot be resized and
+        # ignores `.defaultSize` outright — which is why setting it in
+        # `SooshViewerApp` appeared to do nothing.
+        SUPPORTS_MACCATALYST: YES
+        # Catalyst gets its own bundle id derived from the iOS one, rather than
+        # sharing it.
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: YES
+        # Deployment target for the Catalyst variant. Matched to iOS 26 for the
+        # same reason: Liquid Glass unconditionally.
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+
+  # Tests run on iOS only. The connect loop under test is platform-independent,
+  # and a second test target would just double the run time.
+  SooshTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Soosh-iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        # xcodegen derives TEST_HOST from the *target* name, but PRODUCT_NAME is
+        # "Soosh" — so the default path points at an app that does not exist.
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Soosh.app/Soosh
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  Soosh-tvOS:
+    templates: [App]
+    platform: tvOS
+    info:
+      path: Generated/Info-tvOS.plist
+      properties:
+        CFBundleDisplayName: Soosh
+        DISPATCHARR_URL: $(DISPATCHARR_URL)
+        DISPATCHARR_USER: $(DISPATCHARR_USER)
+        DISPATCHARR_PASS: $(DISPATCHARR_PASS)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.soosh.viewer.tv
