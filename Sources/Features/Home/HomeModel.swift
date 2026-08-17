@@ -26,6 +26,13 @@ final class HomeModel {
     private(set) var catalog: ChannelCatalog = .empty
     private(set) var guide: EPGGuide = .empty
 
+    /// Set when a refresh failed but cached content is still on screen.
+    ///
+    /// Distinct from `.failed`, which means "there is nothing to show". This one
+    /// means "what you are looking at may be out of date" — a different message
+    /// and a much smaller piece of UI.
+    private(set) var refreshError: String?
+
     /// Bound to the header's search field. Filtering is local; the API's
     /// `search` param would mean a round trip per keystroke.
     var searchText: String = ""
@@ -95,7 +102,17 @@ final class HomeModel {
             // show is not an answer to it. Keeping the name match would make the
             // toggle look broken on exactly the searches it exists for.
             if onNowOnly {
-                guard let program = currentProgram(for: channel) else { return false }
+                // A channel with no EPG at all falls back to its name. It is
+                // always "on" in the only sense available — there is nothing to
+                // say it is *not* — and excluding it would make a whole class of
+                // channel unreachable under this toggle rather than merely
+                // unranked. Note this is *no schedule whatsoever*, not "no
+                // programme right now": a channel with a schedule that has a gap
+                // is genuinely showing nothing.
+                guard let program = currentProgram(for: channel) else {
+                    return guide.programs(for: channel).isEmpty
+                        && channel.displayName.localizedCaseInsensitiveContains(query)
+                }
                 return matches(program, query)
             }
             if channel.displayName.localizedCaseInsensitiveContains(query) { return true }
@@ -120,9 +137,9 @@ final class HomeModel {
     private let channels: ChannelRepository
     private let epg: EPGRepository
 
-    init(client: DispatcharrClient) {
+    init(client: DispatcharrClient, cache: CatalogCache? = nil) {
         self.client = client
-        self.channels = ChannelRepository(client: client)
+        self.channels = ChannelRepository(client: client, cache: cache)
         self.epg = EPGRepository(client: client)
     }
 
@@ -173,6 +190,25 @@ final class HomeModel {
         }
         state = .loading
 
+        // **Paint from disk first, then revalidate.**
+        //
+        // The catalog is ~470KB across three endpoints and `channels/groups`
+        // alone is 432KB of which most is discarded — a second of staring at a
+        // spinner for a lineup that changes when a playlist is re-synced, not
+        // while the app is open. Showing the stored copy immediately and
+        // correcting it when the network answers is the whole point of the
+        // cache.
+        //
+        // Note the guide is *not* cached and is still empty here, so cards fall
+        // back to the channel number for a moment. That is the trade: content
+        // now, programme titles a beat later.
+        var servingCache = false
+        if let cached = await channels.cachedCatalog() {
+            catalog = cached
+            state = .loaded
+            servingCache = true
+        }
+
         do {
             if await !client.isAuthenticated, AppConfig.hasCredentials {
                 try await client.login(
@@ -192,17 +228,36 @@ final class HomeModel {
             // CancellationError instead of mutating a dead object.
             catalog = try await catalogTask
             guide = try await guideTask
+            refreshError = nil
             state = .loaded
         } catch is CancellationError {
-            state = .idle
+            // Cache-served content is still on screen and still valid; dropping
+            // to .idle would clear a populated view on a routine navigation.
+            state = servingCache ? .loaded : .idle
         } catch let error as APIError {
-            state = .failed(
+            reportRefreshFailure(
                 error.isUnauthorized
                     ? "Login failed — check DISPATCHARR_USER / DISPATCHARR_PASS."
-                    : (error.errorDescription ?? "Could not load channels.")
+                    : (error.errorDescription ?? "Could not load channels."),
+                servingCache: servingCache
             )
         } catch {
-            state = .failed("Could not reach \(AppConfig.baseURL).")
+            reportRefreshFailure("Could not reach \(AppConfig.baseURL).", servingCache: servingCache)
         }
+    }
+
+    /// A failed refresh is only a failed *screen* when there is nothing to show.
+    ///
+    /// **The cached catalog stays up.** Replacing a working lineup with an error
+    /// because the revalidation leg failed is the classic stale-while-revalidate
+    /// mistake: it takes the offline case, which the cache exists to survive,
+    /// and makes it look exactly like having no cache at all.
+    private func reportRefreshFailure(_ message: String, servingCache: Bool) {
+        guard !servingCache else {
+            refreshError = message
+            state = .loaded
+            return
+        }
+        state = .failed(message)
     }
 }

@@ -13,10 +13,10 @@ struct ChannelCard: View {
 
     /// Cards step up a size at regular width - iPad full screen, a wide Mac
     /// window - where a 240pt card reads as a phone card on a big screen.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     /// Adopt the logo's own plate when it has one, so the artwork reads as part

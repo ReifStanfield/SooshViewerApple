@@ -1,6 +1,10 @@
 import SwiftUI
 
-#if os(iOS)
+// Excluded on tvOS rather than limited to iOS. The TV has `TVSidebarShell`, a
+// genuinely different piece of chrome for a ten-foot device; everything else —
+// iPad at regular width, and now a native Mac window, which is always regular —
+// wants this one. Nothing inside is UIKit-only.
+#if !os(tvOS)
 
     /// Sizes for the iPad/Mac sidebar.
     ///

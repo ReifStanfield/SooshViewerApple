@@ -31,14 +31,12 @@ struct RootView: View {
     /// and a compact width does not reset it.
     @State private var sidebarSelection: SidebarDestination = .home
 
-    #if os(iOS)
-        /// Regular width gets the sidebar, compact keeps the tab bar.
-        ///
-        /// Width, not idiom: an iPad in Slide Over is compact and should behave
-        /// like a phone, and a resized Mac window is the same story. Asking
-        /// "is this an iPad" would get both wrong.
-        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
+    /// Regular width gets the sidebar, compact keeps the tab bar.
+    ///
+    /// Width, not idiom: an iPad in Slide Over is compact and should behave like
+    /// a phone. Asking "is this an iPad" would get that wrong. A native Mac is
+    /// always regular and always takes the sidebar — see `RegularWidth`.
+    @RegularWidth private var isRegularWidth
 
     var body: some View {
         Group {
@@ -51,7 +49,14 @@ struct RootView: View {
         }
         .task {
             guard model == nil else { return }
-            let created = HomeModel(client: client)
+            // Opened here rather than in an `init` or a `@State(initialValue:)`,
+            // for the reason in CLAUDE.md: initial values are constructed on
+            // every rebuild and thrown away, and this one opens a SQLite store.
+            //
+            // Not the SwiftUI `.modelContainer` scene modifier either — the
+            // cache belongs to `ChannelRepository`, and `Sources/Data/` has no
+            // SwiftUI imports to spend on it.
+            let created = HomeModel(client: client, cache: CatalogCache.makeDefault())
             model = created
             await created.load()
         }
@@ -65,7 +70,7 @@ struct RootView: View {
                 screen(destination, model: model)
             }
         #else
-            if horizontalSizeClass == .regular {
+            if isRegularWidth {
                 // iPad and Mac: the same navigation set as tvOS, in a panel that
                 // slides the content aside — see `SidebarShell`.
                 SidebarShell(selection: $sidebarSelection) { destination in

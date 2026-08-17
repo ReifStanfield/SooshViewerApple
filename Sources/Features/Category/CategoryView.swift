@@ -125,12 +125,12 @@ struct CategoryView: View {
             // is drawn: this is what the *next* screen's back button is labelled
             // with, so a stale value would show up one push later.
             .navigationTitle(current.name)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     categoryMenu
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .trailingAccessory) {
                     HStack {
                         Text(model.subtitle(for: current))
                             .font(.footnote)

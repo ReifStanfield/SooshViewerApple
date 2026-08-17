@@ -6,13 +6,18 @@ import Foundation
 /// and resolved locally rather than per card.
 actor ChannelRepository {
     private let client: DispatcharrClient
+    private let cache: CatalogCache?
     private var logosByID: [Int: Logo] = [:]
     private var logosLoaded = false
     private var groups: [ChannelGroup] = []
     private var groupsLoaded = false
 
-    init(client: DispatcharrClient) {
+    /// `cache` is optional so tests and previews can run without touching disk,
+    /// and so a store that fails to open degrades to the network-only behaviour
+    /// this repository had before rather than failing the launch.
+    init(client: DispatcharrClient, cache: CatalogCache? = nil) {
         self.client = client
+        self.cache = cache
     }
 
     /// `GET /api/channels/channels/` — every page.
@@ -41,18 +46,40 @@ actor ChannelRepository {
         return groups
     }
 
+    /// The last catalog written to disk, or nil on a first launch.
+    ///
+    /// **Cheap and non-throwing by design.** This is the half of
+    /// stale-while-revalidate that runs before the network, so anything it could
+    /// fail at is something the caller would ignore anyway — see `CatalogCache`.
+    ///
+    /// Deliberately not folded into `fetchCatalog`: the caller needs to *paint*
+    /// between the two, which means it needs them as two calls rather than one
+    /// that eventually returns the better answer.
+    func cachedCatalog() async -> ChannelCatalog? {
+        await cache?.load()
+    }
+
     /// Channels, logos and groups together, so callers get a consistent set.
+    ///
+    /// Writes through to the cache on success. A `search` term is *not* cached:
+    /// it is a filtered subset, and storing one would leave the next launch
+    /// convinced the lineup is three channels long.
     func fetchCatalog(search: String? = nil) async throws -> ChannelCatalog {
         // Independent calls — `async let` runs them concurrently, the direct
         // equivalent of Dart's `Future.wait`.
         async let channels = fetchChannels(search: search)
         async let logos = fetchLogos()
         async let groups = fetchGroups()
-        return ChannelCatalog(
+        let catalog = ChannelCatalog(
             channels: try await channels,
             logosByID: try await logos,
             groups: try await groups
         )
+
+        if search == nil {
+            await cache?.save(catalog)
+        }
+        return catalog
     }
 }
 

@@ -74,21 +74,60 @@ final class AVPlayerEngine: PlaybackEngine {
     /// throwaway engine SwiftUI constructed during a rebuild kicked the shared
     /// session. Configure the session when you are about to use it, not when you
     /// are merely allocated.
+    ///
+    /// **macOS has no `AVAudioSession` at all** — it is not deprecated there,
+    /// the class is unavailable. Nothing is lost by skipping it: the session
+    /// exists to negotiate with a ring/silent switch and with backgrounding
+    /// rules, and a Mac has neither. Core Audio routes the output without being
+    /// asked.
     private func configureAudioSession() {
-        guard !audioSessionReady else { return }
-        audioSessionReady = true
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            // Not fatal — video still plays, audio routing is just less correct.
-            print("AVAudioSession setup failed: \(error)")
-        }
+        #if !os(macOS)
+            guard !audioSessionReady else { return }
+            audioSessionReady = true
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                // Not fatal — video still plays, audio routing is just less correct.
+                print("AVAudioSession setup failed: \(error)")
+            }
+        #endif
+    }
+
+    /// The live rewrap, when this stream is a raw transport stream.
+    ///
+    /// Held so it can be torn down with the item — it owns the upstream socket,
+    /// and leaking one leaves Dispatcharr counting the channel as in use.
+    @ObservationIgnored private var rewrap: TSRewrapSession?
+
+    /// Whether `url` is a raw MPEG-TS body rather than something AVFoundation
+    /// can open directly.
+    ///
+    /// Matched on the path rather than a file extension: these URLs end in a
+    /// channel UUID, not `.ts`.
+    static func needsRewrap(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return path.contains("/proxy/ts/") || path.hasSuffix(".ts")
     }
 
     func open(url: URL, headers: [String: String]) async throws {
         configureAudioSession()
         await stop()
+
+        // **Raw transport streams are wrapped in HLS before AVFoundation sees
+        // them.** This is where the FFmpeg dependency used to be. AVFoundation
+        // decodes MPEG-TS — it is HLS's original segment container, and these
+        // channels are ordinary H.264/AAC — but it cannot consume an endless,
+        // unindexed TS body. `TSRewrapSession` holds that socket open, cuts the
+        // bytes at keyframes and serves them back as a live playlist on
+        // loopback, so the same picture arrives through the HLS client Apple
+        // already wrote. See Sources/Playback/TransportStream.
+        var url = url
+        if Self.needsRewrap(url) {
+            let session = TSRewrapSession(upstreamURL: url, headers: headers)
+            rewrap = session
+            url = try await session.start()
+        }
 
         // `AVURLAssetHTTPHeaderFieldsKey` is how everyone passes auth headers to
         // AVFoundation, but it is not in the public headers. The supported
@@ -96,25 +135,63 @@ final class AVPlayerEngine: PlaybackEngine {
         // reimplementing HLS playlist fetching by hand. Dispatcharr's
         // `/proxy/ts/stream/` allows anonymous access, so this path is only
         // exercised if an apiKey is ever supplied.
-        let options: [String: Any] = headers.isEmpty
+        //
+        // On the rewrapped path there is nothing to authenticate to: the
+        // headers were spent on the upstream request inside `TSRewrapSession`,
+        // and what AVFoundation is loading is our own loopback server.
+        var options: [String: Any] = (headers.isEmpty || rewrap != nil)
             ? [:]
             : ["AVURLAssetHTTPHeaderFieldsKey": headers]
 
+        // **These streams are endless.** The rewrap gives them an index but not
+        // an ending — the playlist carries no `EXT-X-ENDLIST`, because it is
+        // live. Asking AVFoundation for precise timing still means reading ahead
+        // for a duration that is never coming.
+        options[AVURLAssetPreferPreciseDurationAndTimingKey] = false
+
         let asset = AVURLAsset(url: url, options: options)
         let item = AVPlayerItem(asset: asset)
+
+        // Start on a small buffer instead of AVPlayer's automatic one.
+        //
+        // Left to itself the player decides how much to buffer from a duration
+        // and a bitrate it cannot know here, and errs long — seconds of TS
+        // before the first frame. This is live television: being two seconds
+        // behind is the point, and a rebuffer costs less than the wait.
+        item.preferredForwardBufferDuration = 2
+
         observe(item)
         player.replaceCurrentItem(with: item)
         player.play()
 
-        // Track lists are loaded, not read: the modern AVFoundation accessors
-        // are async because the asset may still be fetching its playlist. The
-        // sync `mediaSelectionGroup(forMediaCharacteristic:)` is deprecated and
-        // would block. Failures here are non-fatal — the stream plays, the
-        // pickers are just empty.
-        audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
-        subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
-        await refreshAudioChannelCount(for: item)
+        // **Metadata is loaded alongside playback, never ahead of it.**
+        //
+        // These three awaits used to sit here, before `open()` returned — and
+        // `PlayerModel` does not start watching for playback until it does. On a
+        // stream with no playlist to parse they can take seconds or hang
+        // outright, which delayed the *detection* of a stream that was already
+        // playing, started the stall and overall clocks late, and showed
+        // "connecting" over a live picture.
+        //
+        // Nothing here affects playback: it fills the audio and subtitle
+        // pickers. It belongs off the connect path entirely.
+        metadataTask?.cancel()
+        metadataTask = Task { [weak self] in
+            let audio = try? await asset.loadMediaSelectionGroup(for: .audible)
+            let subtitles = try? await asset.loadMediaSelectionGroup(for: .legible)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                // The user may already be on another channel.
+                guard let self, self.player.currentItem === item else { return }
+                self.audioGroup = audio
+                self.subtitleGroup = subtitles
+            }
+            await self?.refreshAudioChannelCount(for: item)
+        }
     }
+
+    /// Loads the track lists without blocking the connect path.
+    @ObservationIgnored private var metadataTask: Task<Void, Never>?
 
     // MARK: - Stream metadata
 
@@ -264,6 +341,31 @@ final class AVPlayerEngine: PlaybackEngine {
             },
         ]
 
+        // **Live-edge recovery**, only on the rewrapped path.
+        //
+        // A normal HLS asset or a file has an ending and can be left where the
+        // user put it. A rewrapped live channel cannot: the upstream keeps
+        // running while the app is occluded — moving to another full-screen app
+        // on Catalyst is the reliable way to see it — so the playlist window
+        // slides on while playback stands still, and past ~25s the segment the
+        // player wants has been evicted. See `LiveEdgePolicy`.
+        if rewrap != nil {
+            startLiveEdgeWatch()
+
+            // A stall is the fast signal for the same condition. The periodic
+            // check would catch it a second later anyway, but a stall is exactly
+            // when a second of black is most obvious.
+            stallObserver = NotificationToken(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.playbackStalledNotification,
+                    object: item,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.catchUpToLiveEdge() }
+                }
+            )
+        }
+
         // A stream that dies mid-playback never changes `status` — it is already
         // .readyToPlay. This is the only signal for it.
         failureObserver = NotificationToken(
@@ -279,10 +381,89 @@ final class AVPlayerEngine: PlaybackEngine {
         )
     }
 
+    // MARK: - Live-edge recovery
+
+    /// Periodic observer token. Held because it must be removed by hand —
+    /// unlike KVO, a time observer outlives its player until it is.
+    @ObservationIgnored private var liveEdgeObserver: Any?
+
+    @ObservationIgnored private var stallObserver: NotificationToken?
+
+    private func startLiveEdgeWatch() {
+        stopLiveEdgeWatch()
+        // Once a second. The threshold is 8s, so a finer interval buys nothing
+        // and a coarser one lets the gap grow while we are not looking.
+        liveEdgeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.catchUpToLiveEdge() }
+        }
+    }
+
+    private func stopLiveEdgeWatch() {
+        if let liveEdgeObserver {
+            player.removeTimeObserver(liveEdgeObserver)
+            self.liveEdgeObserver = nil
+        }
+        stallObserver = nil
+    }
+
+    /// Jumps to the live edge when playback has fallen too far behind it.
+    private func catchUpToLiveEdge() {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+        // The seekable range *is* the server's sliding window, republished by
+        // AVFoundation — which is why this needs no knowledge of segment count
+        // or target duration.
+        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
+
+        let start = CMTimeGetSeconds(range.start)
+        let end = CMTimeGetSeconds(range.end)
+        let now = CMTimeGetSeconds(item.currentTime())
+        guard now.isFinite, start.isFinite, end.isFinite else { return }
+
+        guard let target = LiveEdgePolicy.catchUpTarget(
+            currentTime: now,
+            seekableStart: start,
+            seekableEnd: end
+        ) else { return }
+
+        // **Tolerance is asymmetric on purpose.** `.zero` after and infinity
+        // before lets AVFoundation land on the nearest earlier sync sample
+        // rather than decoding forward to hit an exact time it does not need to.
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .positiveInfinity,
+            toleranceAfter: .zero
+        ) { [weak self] finished in
+            guard finished else { return }
+            MainActor.assumeIsolated { self?.player.play() }
+        }
+    }
+
     /// Gives the upstream session back, as promptly as the platform allows.
     func stop() async {
+        // Cancelled first: a metadata load still in flight holds the asset, and
+        // the asset holds the socket this is trying to give back.
+        metadataTask?.cancel()
+        metadataTask = nil
+
+        // Before the item goes: a periodic observer left on a player whose item
+        // has been replaced keeps firing against the new one.
+        stopLiveEdgeWatch()
+
         player.pause()
         player.replaceCurrentItem(with: nil)
+
+        // **After the pause, and after the item is gone.** The pause-before-
+        // release rule now has a second half: the socket Dispatcharr counts is
+        // the rewrap's, not AVPlayer's, so tearing the session down while the
+        // player is still reading would leave the player fetching segments from
+        // a server that has stopped being fed. Player first, then the session.
+        if let rewrap {
+            self.rewrap = nil
+            await rewrap.stop()
+        }
 
         observations.forEach { $0.invalidate() }
         observations.removeAll()
@@ -303,7 +484,11 @@ final class AVPlayerEngine: PlaybackEngine {
 
     // MARK: - Picture in Picture
 
-    #if os(iOS)
+    // Excluded on tvOS rather than limited to iOS: `AVPictureInPictureController`
+    // exists on macOS and behaves the same way, so the Mac gets PiP for free.
+    // tvOS is the platform without it — the TV *is* the screen, so there is no
+    // second window to float over.
+    #if !os(tvOS)
         // Not observed: nothing in a view body reads it, and @Observable would
         // otherwise generate tracking for a type views never touch.
         @ObservationIgnored private var pipController: AVPictureInPictureController?

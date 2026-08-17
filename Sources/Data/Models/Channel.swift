@@ -51,6 +51,72 @@ struct Channel: Identifiable, Hashable, Sendable {
             ? String(Int(number))
             : String(format: "%.1f", number)
     }
+
+    /// Full initialiser, for rebuilding a channel from the disk cache.
+    ///
+    /// The compiler-generated memberwise init is `private`, because the
+    /// `effective*Raw` fields are — which is what `previewMock` below uses, and
+    /// which stops at this file's edge. `CachedChannel` lives in another file
+    /// and needs a way in.
+    init(
+        id: Int,
+        uuid: String,
+        name: String,
+        channelNumber: Double?,
+        channelGroupID: Int?,
+        tvgID: String?,
+        epgDataID: Int?,
+        logoID: Int?,
+        isHiddenFromOutput: Bool,
+        isAdult: Bool,
+        effectiveName: String?,
+        effectiveChannelNumberRaw: Double?,
+        effectiveLogoIDRaw: Int?,
+        effectiveTvgIDRaw: String?,
+        effectiveEpgDataIDRaw: Int?,
+        effectiveChannelGroupIDRaw: Int?
+    ) {
+        self.id = id
+        self.uuid = uuid
+        self.name = name
+        self.channelNumber = channelNumber
+        self.channelGroupID = channelGroupID
+        self.tvgID = tvgID
+        self.epgDataID = epgDataID
+        self.logoID = logoID
+        self.isHiddenFromOutput = isHiddenFromOutput
+        self.isAdult = isAdult
+        self.effectiveName = effectiveName
+        self.effectiveChannelNumberRaw = effectiveChannelNumberRaw
+        self.effectiveLogoIDRaw = effectiveLogoIDRaw
+        self.effectiveTvgIDRaw = effectiveTvgIDRaw
+        self.effectiveEpgDataIDRaw = effectiveEpgDataIDRaw
+        self.effectiveChannelGroupIDRaw = effectiveChannelGroupIDRaw
+    }
+
+    /// The raw override values, for persistence.
+    ///
+    /// **Raw, not coalesced.** Storing `displayName` into `effectiveName` would
+    /// read back identically today, but it silently converts "the provider named
+    /// this and there is no override" into "there is an override" — so a later
+    /// server-side rename would stop taking effect for cached channels only.
+    var persistedOverrides: (
+        name: String?,
+        channelNumber: Double?,
+        logoID: Int?,
+        tvgID: String?,
+        epgDataID: Int?,
+        groupID: Int?
+    ) {
+        (
+            effectiveName,
+            effectiveChannelNumberRaw,
+            effectiveLogoIDRaw,
+            effectiveTvgIDRaw,
+            effectiveEpgDataIDRaw,
+            effectiveChannelGroupIDRaw
+        )
+    }
 }
 
 extension Channel: Decodable {

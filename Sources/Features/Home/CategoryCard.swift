@@ -11,10 +11,10 @@ struct CategoryCard: View {
     let category: Category
     let subtitle: String
 
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     private var background: RGBColor { neutralCardColor(seed: category.name) }

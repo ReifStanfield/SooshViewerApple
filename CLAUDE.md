@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 32 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 54 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -42,14 +42,17 @@ absent from the manifest.
 
 ```
 Sources/Data/         Client, models, repositories. No SwiftUI imports.
-Sources/Playback/     PlaybackEngine protocol + AVPlayerEngine.
+                      Cache/ is the SwiftData catalog cache.
+Sources/Playback/     PlaybackEngine protocol, AVPlayerEngine.
+                      TransportStream/ rewraps live MPEG-TS as local HLS.
 Sources/Presentation/ Colour maths, logo palette, platform styles, backdrop.
 Sources/Features/     One folder per screen: view + its @Observable model.
                       Category/ takes HomeModel rather than owning one — a
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                32 tests: connect loop + logo palette.
+Tests/                54 tests: connect loop, logo palette, HLS
+                      server, catalog cache, live-edge policy.
 ```
 
 ---
@@ -73,12 +76,131 @@ Two things Swift does better and one place it is stricter:
 
 ---
 
+## The catalog is cached in SwiftData; the guide is not
+
+Startup used to fetch ~470KB across three endpoints every launch, and
+`channels/groups` alone is **432KB of which most is discarded** — a provider
+ships 1282 groups where this account renders about a dozen categories.
+
+`CatalogCache` (`Sources/Data/Cache/`) stores channels, logos and groups, and
+`HomeModel.load()` is stale-while-revalidate: paint from disk, then refresh.
+
+**The EPG guide is deliberately not cached.** It is only 139KB and it is
+perishable — programmes age out within hours, so a hit would usually be a wrong
+answer needing immediate invalidation. Cache the stable thing, fetch the
+perishable one.
+
+Four decisions worth not re-litigating:
+
+- **`@Model` types mirror the domain models rather than replacing them.**
+  `Channel` stays an immutable `Sendable` struct. Model classes are reference
+  types and **not `Sendable`**, and channels cross from the client actor to
+  `@MainActor` on every load under `SWIFT_STRICT_CONCURRENCY: complete`. Making
+  `Channel` a `@Model` means passing `PersistentIdentifier`s and re-fetching on
+  the far side, everywhere. The mirror in `CachedCatalog.swift` is the price,
+  and it is paid once.
+- **A `@ModelActor`, not a `.modelContainer` scene modifier.** The cache lives
+  under `ChannelRepository`; `Sources/Data/` has no SwiftUI imports to spend.
+- **The store URL is explicit and created with `create: true`.** SwiftData
+  defaults to `Library/Application Support`, and **on iOS that directory does
+  not exist until something makes it** — with the default, `ModelContainer`
+  fails on a fresh install and the cache silently never works.
+- **Validity is keyed on `serverURL`, not age.** A different Dispatcharr means
+  every id belongs to someone else's installation. There is no TTL because the
+  catalog is revalidated every launch anyway; a stale lineup beats an empty
+  screen while offline, and a failed refresh keeps cached content on screen
+  (`refreshError`) rather than replacing it with `.failed`.
+
+---
+
 ## Playback
 
-`PlaybackEngine` survives the port for a different reason than in Flutter. There
-it existed because media_kit has no tvOS build; here AVPlayer is the only engine.
-It stays because the connect/retry loop is the most load-bearing logic in the app
-and a protocol lets `PlaybackConnectTests` drive it with a scripted fake.
+**One engine, for every URL.** `AVPlayerEngine` plays everything. Live MPEG-TS
+gets wrapped in HLS on the way in; nothing else is special-cased.
+
+### The FFmpeg dependency was a misdiagnosis
+
+This slot held three FFmpeg engines — KSPlayer, then libmpv (MPVKit), then
+AetherEngine — on the premise that **AVFoundation cannot play MPEG-TS.** That
+premise is wrong, and the error is worth stating precisely because it cost three
+integrations and blocked Mac Catalyst three times.
+
+AVFoundation decodes MPEG-TS natively. MPEG-TS is HLS's *original* segment
+container, and these channels are ordinary H.264 High + AAC-LC — verified with
+`ffprobe` against the live server. What AVFoundation cannot consume is
+Dispatcharr's `/proxy/ts/stream/`: an **endless body with no duration, no index
+and no segment boundaries.** Handed one it probes heavily, starts slowly and
+often gives up — measured here as a failure after 27s.
+
+So the missing piece was never a decoder. It was *framing*. Supply the
+boundaries and AVFoundation does the demuxing and decoding it was always willing
+to do.
+
+### `Sources/Playback/TransportStream` — the rewrap
+
+Three files, `Foundation` and `Network` only:
+
+- **`TSSegmenter`** — parses 188-byte packet headers and nothing else. Reads
+  PAT/PMT to find the video PID, cuts where the adaptation field sets
+  `random_access_indicator`, and heads every segment with the cached PAT and PMT
+  so it decodes standalone. Durations come from PCR deltas. **No elementary
+  stream is ever looked at, let alone decoded.**
+- **`LocalHLSServer`** — an `NWListener` bound to loopback serving a sliding-
+  window live playlist (no `EXT-X-ENDLIST`) plus the segments.
+- **`TSRewrapSession`** — holds the one upstream socket, feeds the segmenter,
+  publishes to the server, and reconnects on drop (bounded, for the same reason
+  the old `liveSourceReset` was bounded).
+
+`AVPlayerEngine.needsRewrap(_:)` routes `/proxy/ts/` through it. Matched on the
+path, not an extension: these URLs end in a channel UUID, not `.ts`.
+
+**What this bought, beyond Catalyst:** AirPlay, PiP, Now Playing and the track
+pickers are on the live path now instead of being structurally unavailable
+there, so `PlayerControlsView` / `TVPlayerControlsView` no longer need forking.
+Several GB of xcframeworks and the tvOS-simulator `EXCLUDED_ARCHS` workaround
+are gone with it.
+
+`PlaybackEngine` stays a protocol. Not for a second engine any more — for
+`PlaybackConnectTests`, which drives the connect loop with a scripted fake and
+no decoder.
+
+### Rewrap specifics
+
+- **A server, not an `AVAssetResourceLoaderDelegate`.** The delegate is the
+  "supported" route and it is a trap for HLS: adopting it means reimplementing
+  playlist fetching, live-edge tracking and reload timing by hand against an
+  interface with almost no error reporting. A loopback socket lets AVFoundation
+  use the HLS client Apple already ships.
+- **Chunks reach the segmenter through an `AsyncStream`, never a `Task` per
+  delegate callback.** Unstructured tasks are unordered, so a task per chunk
+  interleaves socket reads and writes garbage into the middle of a segment.
+- **A segment cannot be shorter than the GOP** (~2.5s here), so join latency is
+  bounded below by how many segments a client wants before it starts.
+  `EXT-X-START` pulls the start point to one target duration back rather than
+  the default three; it is the first knob to turn if channels rebuffer on join.
+- **The upstream runs whether or not anything is watching, so a stalled player
+  falls out of the window.** Occlude the app — moving to another full-screen app
+  on Catalyst is the reliable way — and the playlist keeps sliding while
+  playback stands still; past the window every segment request is a 404 with no
+  way back, which reads as "froze once, choppy forever". `LiveEdgePolicy` plus
+  the periodic check in `AVPlayerEngine` jumps to live when the window's start
+  catches up to the position. The window is 10 segments so short switches resume
+  seamlessly instead of jumping.
+- **`seekableTimeRanges.end` is *not* the live edge.** A live client may not seek
+  within three target durations of the end, so healthy playback sits *ahead* of
+  the seekable range — measured here as `currentTime` 14.81 against `0.00…6.01`.
+  A catch-up test written against `seekableEnd` as though it were the edge can
+  never fire. Compare against `seekableStart` instead; that is the end eviction
+  arrives from.
+- **Bytes before the first random-access point are discarded.** We join
+  mid-picture, and keeping them makes segment 0 — the one every client loads
+  first — the only segment that cannot decode standalone.
+- **`NSAllowsLocalNetworking`** is required in every target's Info.plist: the
+  playlist is plain HTTP on 127.0.0.1 and ATS blocks cleartext by default. It
+  relaxes nothing about the Dispatcharr connection, which stays HTTPS.
+- **The live path must hide the navigation bar itself.** It draws its own back
+  button, so without `.navigationBarBackButtonHidden` the system chevron shows up
+  a few points below ours — two back buttons on screen.
 
 `PlayerModel` is a faithful port of the stall-timeout connect loop — **do not
 "simplify" it**, for the reasons in the Flutter CLAUDE.md. One thing genuinely is
@@ -134,6 +256,8 @@ by deleting the suspect:**
 | Control chrome invisible | Dark scrim over letterboxed (black) video |
 | Snapping never works, no warning | `scrollTargetBehavior` on the content, not the ScrollView |
 | Guide scrolled to the wrong place | Scroll fired before the row budget settled |
+| Live channel loads forever, no error | Playlist fine, every *segment* URI 404'd |
+| Video freezes on app switch, choppy after | Player evicted from a window that kept sliding |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning
@@ -231,3 +355,7 @@ the iOS header.
   `/proxy/ts/stream/` returns "All active M3U profiles have reached maximum
   connection limits" after a handful of rapid launches, and needs a minute or two
   to drain. Batch player changes rather than iterating one at a time.
+- **`Soosh-macOS` and the Catalyst variant now overlap.** The native AppKit
+  target exists because Catalyst was blocked three times; dropping FFmpeg
+  unblocked it, so one of the two is redundant. Left standing deliberately —
+  see the comment on the target in `project.yml`.

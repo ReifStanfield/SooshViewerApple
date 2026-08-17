@@ -97,11 +97,11 @@ private struct AppBackgroundModifier: ViewModifier {
             content.background(AppBackground())
         }
     #else
-        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+        @RegularWidth private var isRegularWidth
 
         func body(content: Content) -> some View {
             content.background {
-                if horizontalSizeClass == .regular {
+                if isRegularWidth {
                     SinebowBackground()
                 }
             }

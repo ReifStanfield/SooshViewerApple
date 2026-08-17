@@ -19,6 +19,15 @@ struct Logo: Identifiable, Hashable, Sendable, Decodable {
         return URL(string: url)
     }
 
+    /// Declaring `init(from:)` inside the struct suppresses the memberwise
+    /// init, so this one exists for `CachedLogo` to rebuild from disk.
+    init(id: Int, name: String, url: String, cacheURL: String?) {
+        self.id = id
+        self.name = name
+        self.url = url
+        self.cacheURL = cacheURL
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, name, url
         case cacheURL = "cache_url"

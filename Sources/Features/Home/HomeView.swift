@@ -41,10 +41,10 @@ struct HomeView: View {
     @State private var programDetail: GuideSelection?
 
     /// Cards, tiles and guide rows all step up at regular width — see `Metrics`.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     #if os(tvOS)
@@ -81,7 +81,14 @@ struct HomeView: View {
                         // branch.
                         SettingsView()
                     }
-                    .toolbar(.hidden, for: .navigationBar)
+                    // The screen draws its own header, so the system bar would be
+                    // a second one. `.navigationBar` is a UIKit placement and is
+                    // unavailable on macOS, where a `NavigationStack` puts its
+                    // chrome in the window toolbar instead — see the
+                    // `.toolbar(.hidden)` on the Mac window in `SooshViewerApp`.
+                    #if os(iOS)
+                        .toolbar(.hidden, for: .navigationBar)
+                    #endif
                 #endif
                 // **`fullScreenCover` on tvOS, a push on iOS.**
                 //
