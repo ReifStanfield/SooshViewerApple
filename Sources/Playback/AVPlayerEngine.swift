@@ -2,6 +2,7 @@ import AVFoundation
 // AVPictureInPictureController lives in AVKit, not AVFoundation — the split is
 // "media pipeline" vs "media UI", and PiP counts as UI.
 import AVKit
+import os
 import Observation
 
 /// Playback through AVPlayer.
@@ -127,6 +128,7 @@ final class AVPlayerEngine: PlaybackEngine {
             let session = TSRewrapSession(upstreamURL: url, headers: headers)
             rewrap = session
             url = try await session.start()
+
         }
 
         // `AVURLAssetHTTPHeaderFieldsKey` is how everyone passes auth headers to
@@ -152,13 +154,20 @@ final class AVPlayerEngine: PlaybackEngine {
         let asset = AVURLAsset(url: url, options: options)
         let item = AVPlayerItem(asset: asset)
 
-        // Start on a small buffer instead of AVPlayer's automatic one.
+        // **`preferredForwardBufferDuration` is left at the default of 0.**
         //
-        // Left to itself the player decides how much to buffer from a duration
-        // and a bitrate it cannot know here, and errs long — seconds of TS
-        // before the first frame. This is live television: being two seconds
-        // behind is the point, and a rebuffer costs less than the wait.
-        item.preferredForwardBufferDuration = 2
+        // It was 2, to start on a small buffer rather than AVPlayer's automatic
+        // one, on the reasoning that live television would rather be two seconds
+        // behind than wait. On a rewrapped live playlist that value is smaller
+        // than a single segment, and the item then never reaches
+        // `.readyToPlay` at all: status stays `.unknown`, `tracks` stays empty,
+        // and **nothing is written to `errorLog()`** — the failure is completely
+        // silent, which is why it survived so long.
+        //
+        // 0 means "choose automatically", which is the only setting that works
+        // here. Do not put a number back without checking that a channel still
+        // starts in the *app* — a bare `AVPlayer` in a command-line harness does
+        // not set this property and so never reproduced the bug.
 
         observe(item)
         player.replaceCurrentItem(with: item)
@@ -389,15 +398,79 @@ final class AVPlayerEngine: PlaybackEngine {
 
     @ObservationIgnored private var stallObserver: NotificationToken?
 
+    /// Dumps everything AVFoundation will tell us about a stream that is not
+    /// playing yet.
+    ///
+    /// **This is here because reasoning from the outside kept being wrong.**
+    /// `errorLog()` in particular carries faults that never surface as an item
+    /// error and never reach `lastError` — a rejected playlist tag, a stale
+    /// reload, a segment that 404'd — and it was reading those that identified
+    /// the last two playback bugs. Cheap enough to leave on: it only runs on the
+    /// live path, only while no frame has arrived, and only every few seconds.
+    func logDiagnostics(reason: String) {
+        guard let item = player.currentItem else {
+            Self.log.notice("[\(reason)] no current item")
+            return
+        }
+        let size = item.presentationSize
+        let loaded = item.loadedTimeRanges.map(\.timeRangeValue).map {
+            String(format: "%.1f…%.1f", CMTimeGetSeconds($0.start), CMTimeGetSeconds($0.end))
+        }
+        let seekable = item.seekableTimeRanges.map(\.timeRangeValue).map {
+            String(format: "%.1f…%.1f", CMTimeGetSeconds($0.start), CMTimeGetSeconds($0.end))
+        }
+        // **`privacy: .public` on every value.** os_log redacts interpolated
+        // values by default, and on Catalyst this whole line came back as
+        // `<private>` — a diagnostic that tells you nothing is worse than none,
+        // because it looks like you already checked.
+        let summary = """
+        [\(reason)] status=\(item.status.rawValue) rate=\(self.player.rate) \
+        timeControl=\(self.player.timeControlStatus.rawValue) \
+        pos=\(String(format: "%.2f", CMTimeGetSeconds(item.currentTime()))) \
+        size=\(Int(size.width))x\(Int(size.height)) tracks=\(item.tracks.count) \
+        loaded=\(loaded) seekable=\(seekable) \
+        likelyToKeepUp=\(item.isPlaybackLikelyToKeepUp) bufferEmpty=\(item.isPlaybackBufferEmpty)
+        """
+        Self.log.notice("\(summary, privacy: .public)")
+        if let events = item.errorLog()?.events, !events.isEmpty {
+            for event in events.suffix(3) {
+                Self.log.error("[\(reason, privacy: .public)] errorLog \(event.errorStatusCode, privacy: .public): \(event.errorComment ?? "-", privacy: .public)")
+            }
+        }
+        if let access = item.accessLog()?.events.last {
+            let accessSummary = """
+            [\(reason)] accessLog stalls=\(access.numberOfStalls) \
+            dropped=\(access.numberOfDroppedVideoFrames) \
+            segmentsDownloaded=\(access.numberOfMediaRequests) \
+            indicatedBitrate=\(Int(access.indicatedBitrate))
+            """
+            Self.log.notice("\(accessSummary, privacy: .public)")
+        }
+    }
+
+    private static let log = Logger(subsystem: "com.soosh.viewer", category: "AVPlayerEngine")
+
+    /// Ticks since the watch started, so diagnostics can be throttled.
+    @ObservationIgnored private var watchTicks = 0
+
     private func startLiveEdgeWatch() {
         stopLiveEdgeWatch()
+        watchTicks = 0
         // Once a second. The threshold is 8s, so a finer interval buys nothing
         // and a coarser one lets the gap grow while we are not looking.
         liveEdgeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 1, preferredTimescale: 600),
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.catchUpToLiveEdge() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.watchTicks += 1
+                // Every 2s, and only until a frame has actually arrived.
+                if self.watchTicks % 2 == 0, (self.snapshot.width ?? 0) == 0 {
+                    self.logDiagnostics(reason: "connecting")
+                }
+                self.catchUpToLiveEdge()
+            }
         }
     }
 

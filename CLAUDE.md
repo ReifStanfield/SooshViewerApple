@@ -234,7 +234,7 @@ no decoder.
 simpler: Flutter needs `_openGen` *and* future-chaining to stop overlapping
 connect loops; Swift's `Task` does both (cancel, then `await previous?.value`).
 
-### Three playback bugs that cost real time
+### Four playback bugs that cost real time
 
 - **`automaticallyWaitsToMinimizeStalling` must stay `true`.** Setting it false
   for "start at the live edge" makes AVPlayer drop the requested rate to 0 and
@@ -242,6 +242,14 @@ connect loops; Swift's `Task` does both (cancel, then `await previous?.value`).
   `currentTime()` pinned at 0.00 forever. It hid for two rounds because
   **`AVPlayerViewController` resets this property on any player handed to it** —
   only surfaced after moving to a bare `AVPlayerLayer`.
+- **`preferredForwardBufferDuration` must stay at its default of 0.** Setting it
+  to 2 — "live TV would rather be two seconds behind than wait" — is smaller
+  than one segment on a rewrapped playlist, and the item then **never reaches
+  `.readyToPlay` at all**: status stays `.unknown`, `tracks` stays empty, and
+  nothing is written to `errorLog()`. A completely silent failure, which read as
+  a channel that loads forever. It hid because a bare `AVPlayer` in a
+  command-line harness does not set this property, so every out-of-app
+  reproduction played perfectly.
 - **`hasAudio` must mean "this stream carries no video track"**, not "no frame
   has arrived yet". Live HLS runs audio well before the first decodable frame, so
   the wrong test declared success on a black screen.
@@ -286,6 +294,7 @@ by deleting the suspect:**
 | Live channel loads forever, no error | Playlist fine, every *segment* URI 404'd |
 | Video freezes on app switch, choppy after | Player evicted from a window that kept sliding |
 | Fine for 20 min, then constant stutter | One long segment ratcheted TARGETDURATION for good |
+| Spinner forever, no error anywhere | Forward buffer capped below one segment |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning

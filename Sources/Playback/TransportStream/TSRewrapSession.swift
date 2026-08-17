@@ -62,6 +62,7 @@ actor TSRewrapSession {
             await self?.pump()
         }
 
+        var ticks = 0
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             // **Waits for a *playable* window, not a fixed segment count.**
@@ -71,7 +72,19 @@ actor TSRewrapSession {
             // for it to grow, producing no frame and no progress for the connect
             // loop to see. See `LocalHLSServer.hasPlayableWindow`.
             if await server.hasPlayableWindow {
-                return try await server.playlistURL()
+                let url = try await server.playlistURL()
+                let count = await server.segmentCount
+                Self.log.notice("playable window after \(self.byteCount / 1024)KB, \(count) segments")
+                return url
+            }
+            ticks += 1
+            if ticks % 20 == 0 {
+                // Every ~2s: says plainly whether we are starved of bytes, or
+                // receiving bytes the segmenter cannot cut into segments.
+                let count = await server.segmentCount
+                let kb = byteCount / 1024
+                let tables = segmenter.hasProgramTables
+                Self.log.notice("waiting for playable window: \(kb)KB in, \(count) segments, tables=\(tables)")
             }
             if let lastError, currentTask == nil {
                 throw RewrapError.upstreamFailed(lastError)
