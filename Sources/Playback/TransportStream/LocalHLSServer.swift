@@ -49,12 +49,33 @@ actor LocalHLSServer {
     private var listener: NWListener?
     private var segments: [TSSegment] = []
 
-    /// The largest `EXT-X-TARGETDURATION` announced so far.
+    /// `EXT-X-TARGETDURATION` for the playlist as it stands.
     ///
-    /// **Only ever raised.** Target duration is a promise that no segment
-    /// exceeds it; lowering it after a long segment retroactively breaks that
-    /// promise, and clients respond by stalling rather than complaining.
-    private var announcedTarget = 1
+    /// **Computed from the current window, never ratcheted.** This was a
+    /// monotonic maximum over every segment ever produced, on the reasoning that
+    /// target duration is a promise no segment exceeds. That reading is wrong,
+    /// and it cost a bug that took twenty minutes of viewing to show up: the
+    /// promise is about the segments *in the playlist*, and the playlist only
+    /// ever holds this window.
+    ///
+    /// What the ratchet did, measured: one 8s segment — the `maxSegmentDuration`
+    /// safety valve firing once, or any hiccup — raised the target from 3 to 8
+    /// permanently. A live client may not seek within three target durations of
+    /// the end, so the seekable span collapsed from 16s to 1s against a 25s
+    /// window and stayed there. Playback sat on the eviction boundary and
+    /// rebuffered continuously, and only a new session cleared it, which is why
+    /// changing channel appeared to fix it.
+    ///
+    /// **The invariant to preserve:** the window must comfortably exceed three
+    /// times the longest segment it can hold. See `windowSize` and
+    /// `TSSegmenter.maxSegmentDuration`.
+    private var targetDuration: Int {
+        let longest = segments.map(\.duration).max() ?? 0
+        return max(1, Int(longest.rounded(.up)))
+    }
+
+    /// Highest index published, so a straggler cannot reorder the window.
+    private var lastPublishedIndex = -1
 
     private(set) var port: UInt16?
 
@@ -112,6 +133,7 @@ actor LocalHLSServer {
         listener?.cancel()
         listener = nil
         segments.removeAll()
+        lastPublishedIndex = -1
         port = nil
     }
 
@@ -127,8 +149,19 @@ actor LocalHLSServer {
     // MARK: - Publishing
 
     func publish(_ segment: TSSegment) {
+        // **Out-of-order publishes are dropped rather than appended.**
+        // `EXT-X-MEDIA-SEQUENCE` is read from the first segment in the window and
+        // a client treats it as monotonic; letting a straggler in makes the
+        // sequence go backwards and evicts the wrong end of the window. The
+        // caller is ordered now, so this should never fire — it is here because
+        // it *used* to, and the failure it produced was silent.
+        guard segment.index > lastPublishedIndex else {
+            Self.log.error("out-of-order segment \(segment.index) after \(self.lastPublishedIndex), dropped")
+            return
+        }
+        lastPublishedIndex = segment.index
+
         segments.append(segment)
-        announcedTarget = max(announcedTarget, Int(segment.duration.rounded(.up)))
         if segments.count > windowSize {
             segments.removeFirst(segments.count - windowSize)
         }
@@ -142,7 +175,7 @@ actor LocalHLSServer {
         var lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:3",
-            "#EXT-X-TARGETDURATION:\(announcedTarget)",
+            "#EXT-X-TARGETDURATION:\(targetDuration)",
             "#EXT-X-MEDIA-SEQUENCE:\(segments.first?.index ?? 0)",
         ]
 
@@ -154,7 +187,7 @@ actor LocalHLSServer {
         // of them — ~7.5s of accumulation before the first frame. One segment
         // back is live television's actual expectation. If channels turn out to
         // rebuffer on join, this is the first number to make more negative.
-        lines.append("#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", Double(announcedTarget))),PRECISE=NO")
+        lines.append("#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", Double(targetDuration))),PRECISE=NO")
 
         for segment in segments {
             if segment.isDiscontinuous {

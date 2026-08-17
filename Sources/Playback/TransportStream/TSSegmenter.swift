@@ -60,7 +60,14 @@ struct TSSegmenter {
     /// the process ran out of memory. Cutting mid-GOP produces a segment that
     /// does not start on a keyframe, which a decoder recovers from with a brief
     /// artefact — strictly better than unbounded growth.
-    var maxSegmentDuration: TimeInterval = 8.0
+    ///
+    /// **Lowered from 8s, because this value sizes the damage when it fires.**
+    /// `EXT-X-TARGETDURATION` is the longest segment in the window, and a live
+    /// client may not seek within three of those of the end — so one segment
+    /// this long temporarily costs three times its length out of
+    /// `LocalHLSServer.windowSize`. At 6s against a ~25s window that leaves a
+    /// workable seekable span; at 8s it very nearly did not.
+    var maxSegmentDuration: TimeInterval = 6.0
 
     // MARK: - Stream tables
 

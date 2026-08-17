@@ -96,3 +96,91 @@ struct LocalHLSServerTests {
         #expect((response as? HTTPURLResponse)?.statusCode == 404)
     }
 }
+
+/// Tests for the sliding window's timing invariants.
+///
+/// These exist because of a bug that only showed up after ~20 minutes of
+/// viewing: `EXT-X-TARGETDURATION` was a monotonic maximum over every segment
+/// ever produced, so one long segment raised it permanently. Since a live client
+/// may not seek within three target durations of the end, the seekable span
+/// collapsed against a fixed window and playback rebuffered continuously until
+/// the session was restarted.
+@Suite("Live window timing")
+struct LiveWindowTimingTests {
+    private func makeSegment(index: Int, duration: TimeInterval) -> TSSegment {
+        TSSegment(
+            index: index,
+            data: Data(repeating: UInt8(truncatingIfNeeded: index), count: 256),
+            duration: duration,
+            isDiscontinuous: false
+        )
+    }
+
+    private func targetDuration(of server: LocalHLSServer) async throws -> Int {
+        let url = try await server.playlistURL()
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let text = try #require(String(data: data, encoding: .utf8))
+        let line = try #require(text.split(separator: "\n").first { $0.hasPrefix("#EXT-X-TARGETDURATION:") })
+        return try #require(Int(line.dropFirst("#EXT-X-TARGETDURATION:".count)))
+    }
+
+    @Test("target duration recovers once a long segment leaves the window")
+    func targetDurationSelfHeals() async throws {
+        let server = LocalHLSServer()
+        _ = try await server.start()
+        defer { Task { await server.stop() } }
+
+        var index = 0
+        for _ in 0 ..< 10 { await server.publish(makeSegment(index: index, duration: 2.5)); index += 1 }
+        #expect(try await targetDuration(of: server) == 3)
+
+        // One long segment: the safety valve firing, or any upstream hiccup.
+        await server.publish(makeSegment(index: index, duration: 6)); index += 1
+        #expect(try await targetDuration(of: server) == 6)
+
+        // Once it has aged out of the window the promise no longer applies to it.
+        for _ in 0 ..< 12 { await server.publish(makeSegment(index: index, duration: 2.5)); index += 1 }
+        #expect(try await targetDuration(of: server) == 3, "target duration ratcheted and never recovered")
+    }
+
+    @Test("the window outlasts three target durations even at the worst segment length")
+    func windowOutlastsThreeTargetDurations() async throws {
+        let server = LocalHLSServer()
+        _ = try await server.start()
+        defer { Task { await server.stop() } }
+
+        // The worst realistic mix: a full window of normal segments with one
+        // safety-valve segment in it.
+        var index = 0
+        var total: TimeInterval = 0
+        for _ in 0 ..< 9 {
+            await server.publish(makeSegment(index: index, duration: 2.5)); index += 1
+            total += 2.5
+        }
+        await server.publish(makeSegment(index: index, duration: TSSegmenter().maxSegmentDuration))
+        total += TSSegmenter().maxSegmentDuration
+
+        let target = TimeInterval(try await targetDuration(of: server))
+        // A live client sits three target durations back. If that consumes the
+        // window, playback lives on the eviction boundary and stutters forever.
+        #expect(total - 3 * target > 5, "seekable span collapsed to \(total - 3 * target)s")
+    }
+
+    @Test("an out-of-order segment is dropped rather than walking the sequence backwards")
+    func outOfOrderSegmentIsDropped() async throws {
+        let server = LocalHLSServer()
+        _ = try await server.start()
+        defer { Task { await server.stop() } }
+
+        for index in 0 ..< 5 { await server.publish(makeSegment(index: index, duration: 2.5)) }
+        // A straggler from a racing publish. Accepting it would make
+        // EXT-X-MEDIA-SEQUENCE non-monotonic for a client that already saw 4.
+        await server.publish(makeSegment(index: 2, duration: 2.5))
+
+        let url = try await server.playlistURL()
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let text = try #require(String(data: data, encoding: .utf8))
+        let uris = text.split(separator: "\n").filter { $0.hasSuffix(".ts") }
+        #expect(uris == ["s/0.ts", "s/1.ts", "s/2.ts", "s/3.ts", "s/4.ts"])
+    }
+}

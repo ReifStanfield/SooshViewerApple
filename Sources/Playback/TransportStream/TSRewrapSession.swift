@@ -164,7 +164,7 @@ actor TSRewrapSession {
 
         for await chunk in stream {
             guard !stopped else { break }
-            ingest(chunk)
+            await ingest(chunk)
         }
 
         if let error = delegate.failure {
@@ -175,14 +175,21 @@ actor TSRewrapSession {
         urlSession = nil
     }
 
-    private func ingest(_ chunk: Data) {
+    /// Feeds one upstream chunk to the segmenter and publishes what it completes.
+    ///
+    /// **Awaited in order, never dispatched into a `Task`.** Publishing used to
+    /// spawn an unstructured task per batch, which is the same unordered-task
+    /// hazard the `AsyncStream` above exists to avoid — and it applies just as
+    /// much on the way out as on the way in. Two batches completing close
+    /// together could publish their segments out of order, which walks
+    /// `EXT-X-MEDIA-SEQUENCE` backwards and evicts the wrong end of the window.
+    ///
+    /// Awaiting here also gives the pipeline backpressure it did not have: the
+    /// socket reader cannot outrun the segmenter.
+    private func ingest(_ chunk: Data) async {
         byteCount += chunk.count
-        let produced = segmenter.append(chunk)
-        guard !produced.isEmpty else { return }
-        Task { [server] in
-            for segment in produced {
-                await server.publish(segment)
-            }
+        for segment in segmenter.append(chunk) {
+            await server.publish(segment)
         }
     }
 }

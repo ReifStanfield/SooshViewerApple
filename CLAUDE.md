@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 54 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 57 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -51,8 +51,9 @@ Sources/Features/     One folder per screen: view + its @Observable model.
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                54 tests: connect loop, logo palette, HLS
-                      server, catalog cache, live-edge policy.
+Tests/                57 tests: connect loop, logo palette, HLS
+                      server, catalog cache, live-edge policy,
+                      live-window timing.
 ```
 
 ---
@@ -192,6 +193,22 @@ no decoder.
   A catch-up test written against `seekableEnd` as though it were the edge can
   never fire. Compare against `seekableStart` instead; that is the end eviction
   arrives from.
+- **`EXT-X-TARGETDURATION` is computed from the current window, never
+  ratcheted.** It was a monotonic maximum over every segment ever produced, on
+  the reading that the target is a promise no segment exceeds. The promise is
+  about the segments *in the playlist*, and the playlist is only this window.
+  Measured cost of getting it wrong: one 8s segment raised the target from 3 to
+  8 permanently, and since a live client sits three target durations back, the
+  seekable span collapsed from 16s to 1s against a 25s window and stayed there.
+  Playback then lived on the eviction boundary — fine for twenty minutes, then
+  stuttering for good, cured only by changing channel (a new session).
+  **Invariant: the window must comfortably exceed three times the longest
+  segment it can hold**, which is what ties `windowSize` to
+  `TSSegmenter.maxSegmentDuration`.
+- **Segments are published in order, awaited inline.** Publishing through an
+  unstructured `Task` is the same unordered-task hazard the `AsyncStream` avoids
+  on the way in, and it applies on the way out too: two batches completing
+  together can walk `EXT-X-MEDIA-SEQUENCE` backwards.
 - **Bytes before the first random-access point are discarded.** We join
   mid-picture, and keeping them makes segment 0 — the one every client loads
   first — the only segment that cannot decode standalone.
@@ -258,6 +275,7 @@ by deleting the suspect:**
 | Guide scrolled to the wrong place | Scroll fired before the row budget settled |
 | Live channel loads forever, no error | Playlist fine, every *segment* URI 404'd |
 | Video freezes on app switch, choppy after | Player evicted from a window that kept sliding |
+| Fine for 20 min, then constant stutter | One long segment ratcheted TARGETDURATION for good |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning
