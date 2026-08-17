@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 57 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 61 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -51,9 +51,9 @@ Sources/Features/     One folder per screen: view + its @Observable model.
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                57 tests: connect loop, logo palette, HLS
+Tests/                61 tests: connect loop, logo palette, HLS
                       server, catalog cache, live-edge policy,
-                      live-window timing.
+                      live-window timing, playable window.
 ```
 
 ---
@@ -175,10 +175,20 @@ no decoder.
 - **Chunks reach the segmenter through an `AsyncStream`, never a `Task` per
   delegate callback.** Unstructured tasks are unordered, so a task per chunk
   interleaves socket reads and writes garbage into the middle of a segment.
-- **A segment cannot be shorter than the GOP** (~2.5s here), so join latency is
-  bounded below by how many segments a client wants before it starts.
-  `EXT-X-START` pulls the start point to one target duration back rather than
-  the default three; it is the first knob to turn if channels rebuffer on join.
+- **A live client starts three target durations back, and the playlist must
+  already contain that much.** `TSRewrapSession` waits for
+  `LocalHLSServer.hasPlayableWindow` before handing the URL over. Handing over
+  two segments instead — which it used to — gives AVPlayer nowhere to begin: it
+  loads, waits for the window to grow, and reports no buffer or position
+  movement, so `PlayerModel`'s 6s stall timeout fires and retries, and each
+  retry is another upstream connection. Measured symptoms of getting this wrong:
+  `-12888 Playlist File unchanged for longer than 1.5 * target duration` in the
+  item's error log.
+- **There is no `EXT-X-START`, and adding one back will not work.** A tag asking
+  to start nearer than three target durations is rejected outright —
+  `-16831 START-TIME is too close to live` — so it bought nothing and buried
+  real faults in error-log noise. Join latency here is bounded below by the GOP;
+  the only real fix is Low-Latency HLS.
 - **The upstream runs whether or not anything is watching, so a stalled player
   falls out of the window.** Occlude the app — moving to another full-screen app
   on Catalyst is the reliable way — and the playlist keeps sliding while

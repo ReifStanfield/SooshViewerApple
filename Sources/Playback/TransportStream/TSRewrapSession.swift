@@ -55,7 +55,7 @@ actor TSRewrapSession {
     /// AVPlayer a playlist with no segments in it makes it fail the item
     /// outright instead of retrying, and the failure reads as a broken stream
     /// rather than one that has not started yet.
-    func start(minimumSegments: Int = 2, timeout: Duration = .seconds(20)) async throws -> URL {
+    func start(timeout: Duration = .seconds(25)) async throws -> URL {
         _ = try await server.start()
 
         pumpTask = Task { [weak self] in
@@ -64,7 +64,13 @@ actor TSRewrapSession {
 
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
-            if await server.segmentCount >= minimumSegments {
+            // **Waits for a *playable* window, not a fixed segment count.**
+            // This used to return after two segments, which is less than the
+            // three target durations a live client starts back from — so
+            // AVPlayer got a playlist it could not start from and sat waiting
+            // for it to grow, producing no frame and no progress for the connect
+            // loop to see. See `LocalHLSServer.hasPlayableWindow`.
+            if await server.hasPlayableWindow {
                 return try await server.playlistURL()
             }
             if let lastError, currentTask == nil {

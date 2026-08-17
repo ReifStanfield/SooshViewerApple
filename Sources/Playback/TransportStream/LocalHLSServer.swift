@@ -169,6 +169,24 @@ actor LocalHLSServer {
 
     var segmentCount: Int { segments.count }
 
+    /// Whether the window holds enough for a live client to start.
+    ///
+    /// **A live client begins three target durations back from the end**, so a
+    /// playlist shorter than that gives it nowhere to start: it loads, waits for
+    /// the window to grow, and produces no frame in the meantime. Handing over
+    /// two segments and hoping was worth ~13.5s to first frame on a channel
+    /// measured here — long enough for `PlayerModel`'s 6s stall timeout to fire,
+    /// retry, and open another upstream connection, which reads to the user as
+    /// loading forever.
+    ///
+    /// The extra segment on top is headroom, so the start point is inside the
+    /// window rather than exactly on its edge.
+    var hasPlayableWindow: Bool {
+        guard let longest = segments.map(\.duration).max(), longest > 0 else { return false }
+        let windowDuration = segments.reduce(0) { $0 + $1.duration }
+        return windowDuration >= 3 * Double(targetDuration) + longest
+    }
+
     // MARK: - Playlist
 
     private func playlist() -> String {
@@ -179,15 +197,17 @@ actor LocalHLSServer {
             "#EXT-X-MEDIA-SEQUENCE:\(segments.first?.index ?? 0)",
         ]
 
-        // Start playback near the live edge instead of the default three target
-        // durations back.
+        // **No `EXT-X-START`.** There was one here asking to begin a single
+        // target duration back, as a join-latency knob. It never worked: HLS
+        // requires a live start point at least three target durations from the
+        // end, so AVFoundation rejected it every time and fell back to the
+        // default. The only thing it produced was a permanent
+        // `-16831 START-TIME is too close to live` in the player's error log,
+        // which is noise that hides real faults.
         //
-        // This is the join-latency knob. A segment cannot be shorter than the
-        // GOP (~2.5s here), so the default start point means waiting for three
-        // of them — ~7.5s of accumulation before the first frame. One segment
-        // back is live television's actual expectation. If channels turn out to
-        // rebuffer on join, this is the first number to make more negative.
-        lines.append("#EXT-X-START:TIME-OFFSET=-\(String(format: "%.3f", Double(targetDuration))),PRECISE=NO")
+        // Three target durations back is therefore where playback starts, and
+        // `TSRewrapSession` waits for the window to actually contain that much
+        // before handing the playlist over — see `minimumPlayableWindow`.
 
         for segment in segments {
             if segment.isDiscontinuous {

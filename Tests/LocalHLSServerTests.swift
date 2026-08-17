@@ -184,3 +184,61 @@ struct LiveWindowTimingTests {
         #expect(uris == ["s/0.ts", "s/1.ts", "s/2.ts", "s/3.ts", "s/4.ts"])
     }
 }
+
+/// Tests for the handover gate.
+///
+/// A live client starts three target durations back from the end. Handing it a
+/// playlist shorter than that gives it nowhere to begin: it loads, waits for the
+/// window to grow, and shows nothing meanwhile. The session used to hand over
+/// after two segments, which is well short of that.
+@Suite("Playable window")
+struct PlayableWindowTests {
+    private func makeSegment(index: Int, duration: TimeInterval) -> TSSegment {
+        TSSegment(index: index, data: Data(repeating: 0x47, count: 128),
+                  duration: duration, isDiscontinuous: false)
+    }
+
+    @Test("an empty window is not playable")
+    func emptyWindowIsNotPlayable() async throws {
+        let server = LocalHLSServer()
+        #expect(await server.hasPlayableWindow == false)
+    }
+
+    @Test("two segments are not enough to start a live stream")
+    func twoSegmentsAreNotEnough() async throws {
+        let server = LocalHLSServer()
+        for index in 0 ..< 2 { await server.publish(makeSegment(index: index, duration: 2.5)) }
+        // 5s of window against a 3s target: a client starting 9s back has
+        // nowhere to go. This is the case that stalled the join.
+        #expect(await server.hasPlayableWindow == false)
+    }
+
+    @Test("a window covering three target durations plus headroom is playable")
+    func sufficientWindowIsPlayable() async throws {
+        let server = LocalHLSServer()
+        var index = 0
+        // 2.5s segments -> target 3 -> needs 9s + 2.5s headroom = 11.5s.
+        while await !server.hasPlayableWindow {
+            await server.publish(makeSegment(index: index, duration: 2.5))
+            index += 1
+            #expect(index < 20, "never became playable")
+        }
+        #expect(index == 5)
+    }
+
+    @Test("the playlist advertises no EXT-X-START")
+    func noStartTag() async throws {
+        let server = LocalHLSServer()
+        _ = try await server.start()
+        defer { Task { await server.stop() } }
+        for index in 0 ..< 6 { await server.publish(makeSegment(index: index, duration: 2.5)) }
+
+        let url = try await server.playlistURL()
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let text = try #require(String(data: data, encoding: .utf8))
+        // A start point closer than three target durations is rejected outright
+        // by AVFoundation ("START-TIME is too close to live"), so the tag only
+        // ever produced error-log noise.
+        #expect(!text.contains("#EXT-X-START"))
+    }
+}
