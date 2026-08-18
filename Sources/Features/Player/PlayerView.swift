@@ -223,7 +223,7 @@ struct PlayerView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.toggleControls() }
 
-                PlayerControlsView(model: model, engine: engine) { dismiss() }
+                PlayerControlsView(model: model, engine: engine, logoURL: logoURL) { dismiss() }
 
                 failureOverlay(model)
             }
