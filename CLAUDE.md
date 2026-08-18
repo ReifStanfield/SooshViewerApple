@@ -447,6 +447,7 @@ by deleting the suspect:**
 | Control chrome invisible | Dark scrim over letterboxed (black) video |
 | Snapping never works, no warning | `scrollTargetBehavior` on the content, not the ScrollView |
 | Guide scrolled to the wrong place | Scroll fired before the row budget settled |
+| Channel name's tail in the next block | Sticky header's floor ignored the leading inset |
 | Live channel loads forever, no error | Playlist fine, every *segment* URI 404'd |
 | Video freezes on app switch, choppy after | Player evicted from a window that kept sliding |
 | Fine for 20 min, then constant stutter | One long segment ratcheted TARGETDURATION for good |

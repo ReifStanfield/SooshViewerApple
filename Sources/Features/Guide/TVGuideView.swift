@@ -574,13 +574,28 @@ struct GuideBlockLabel: View {
     private var hidden: CGFloat { scroll.x + overlap - leftOffset }
 
     /// Where the pinned header sits inside this block.
-    static let leadingInset: CGFloat = 10
+    static let leadingInset: CGFloat = 20
 
     /// Gap between the channel name and the time in the header.
+    ///
+    /// Independent of `leadingInset`: it is the space between two pieces of
+    /// text, not a distance from the block's edge. `headerFloor` used to
+    /// conflate the two.
     private let headerSpacing: CGFloat = 14
 
     /// How far *left* of a block the header is allowed to hang.
-    private var headerFloor: CGFloat { -(channelNameWidth + headerSpacing) }
+    ///
+    /// **Derived from `leadingInset`, not from `headerSpacing`.** The header
+    /// starts `leadingInset` inside the block, so to put the channel name's
+    /// right edge exactly on the block's leading edge — where the clip can hide
+    /// it — the offset has to undo that inset as well as the name's own width.
+    ///
+    /// This was `-(channelNameWidth + headerSpacing)`, which is the same number
+    /// only while `leadingInset == headerSpacing`. That held by accident until
+    /// the inset was raised to move the text off the logos, and the name then
+    /// stopped `leadingInset - headerSpacing` short of the edge — 6pt of the
+    /// last letter left showing inside the *next* block, on every row.
+    private var headerFloor: CGFloat { -(Self.leadingInset + channelNameWidth) }
 
     /// Where the header sits inside this block.
     private var headerPin: CGFloat { max(hidden, headerFloor) }
@@ -633,7 +648,8 @@ struct GuideBlockLabel: View {
         }
         .foregroundStyle(foreground)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        // Named, because `headerSpacing` is derived from it — see the note there.
+        // Named, because `headerFloor` has to undo exactly this to slide the
+        // channel name clear of the block — see the note there.
         .padding(.leading, Self.leadingInset)
         .padding(.trailing, 10)
         .padding(.vertical, 8)
@@ -687,7 +703,7 @@ struct GuideLogoTile: View {
         logoTileColor(plate: plate, seed: channel.effectiveTvgID ?? channel.uuid)
     }
 
-    private var plateWidth: CGFloat { width - Self.horizontalInset }
+    private var plateWidth: CGFloat { width * 1.15 - Self.horizontalInset }
     private var plateHeight: CGFloat { height - Self.verticalInset }
 
     var body: some View {
@@ -699,7 +715,7 @@ struct GuideLogoTile: View {
                     case .success(let image):
                         // No button here — the whole tile is the button, wrapped
                         // by the logo column in `TVGuideView.grid`.
-                        image.resizable().scaledToFit()
+                        image.resizable().scaledToFit().padding(6)
                     case .failure:
                         Image(systemName: "tv")
                             .foregroundStyle(background.foreground.opacity(0.6))

@@ -211,10 +211,11 @@ struct HomeView: View {
                     // page pays for it. The sidebar already carries the same
                     // navigation, so on TV the home page is what is on now and
                     // what is on next.
+                    guideGrid
+                    
                     #if !os(tvOS)
                         categoriesGrid
                     #endif
-                    guideGrid
                 }
             }
             .padding(.vertical, Layout.screenMarginV + 16)
@@ -358,8 +359,8 @@ struct HomeView: View {
 
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: metrics.categoryCardMinWidth),
-                                       spacing: Layout.isTV ? 40 : 16)],
-                    spacing: Layout.isTV ? 40 : 16
+                                       spacing: Layout.isTV ? 40 : 8)],
+                    spacing: Layout.isTV ? 40 : 8
                 ) {
                     ForEach(model.categories) { category in
                         Button {

@@ -66,11 +66,11 @@ struct Metrics: Equatable, Sendable {
     static let compact = Metrics(
         cardWidth: 240,
         categoryCardMinWidth: 150,
-        categoryCardHeight: 92,
-        guideRowHeight: 60,
+        categoryCardHeight: 78,
+        guideRowHeight: 68,
         guidePixelsPerMinute: 8,
-        guideTitleFont: 18,
-        guideSubtitleFont: 15,
+        guideTitleFont: 16,
+        guideSubtitleFont: 12,
         guideLogoInitialFont: 20
     )
 
@@ -188,7 +188,7 @@ func logoPlateCornerRadius(forWidth width: CGFloat) -> CGFloat {
 /// shape when that changes; they are meant to read as the same object at
 /// different sizes.
 func guideLogoCornerRadius(forWidth width: CGFloat) -> CGFloat {
-    logoPlateCornerRadius(forWidth: width) * 1.6
+    logoPlateCornerRadius(forWidth: width) * 1.8
 }
 
 /// How many guide rows to draw for a given viewport.

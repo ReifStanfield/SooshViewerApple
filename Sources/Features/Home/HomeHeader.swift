@@ -119,7 +119,7 @@ struct HomeHeader: View {
         } label: {
             HStack(spacing: 6) {
                 Text("Home")
-                    .font(.largeTitle.weight(.bold))
+                    .font(.system(size: 28).bold())
                 Image(systemName: "chevron.down")
                     .font(.title3.weight(.semibold))
             }

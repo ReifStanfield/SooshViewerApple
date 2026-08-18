@@ -22,7 +22,7 @@ struct CategoryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(category.name)
-                .font(Layout.isTV ? .title3.weight(.semibold) : .headline)
+                .font(Layout.isTV ? .title3.weight(.semibold) : .subheadline.bold())
                 .foregroundStyle(background.foreground)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
