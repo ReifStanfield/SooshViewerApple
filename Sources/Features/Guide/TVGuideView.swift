@@ -1,7 +1,16 @@
 import SwiftUI
 
+// Text measurement below needs a concrete font object, which SwiftUI's `Font`
+// deliberately is not — it is a description, resolved at render time, with no
+// public metrics. So the platform's own font class is used, under one name.
 #if canImport(UIKit)
     import UIKit
+
+    private typealias PlatformFont = UIFont
+#else
+    import AppKit
+
+    private typealias PlatformFont = NSFont
 #endif
 
 /// A horizontally-scrolling TV guide grid.
@@ -52,10 +61,10 @@ struct TVGuideView: View {
 
     /// Regular width — iPad full screen, a wide Mac window — draws the guide a
     /// step larger. A no-op on tvOS, which `Metrics.resolve` ignores.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     /// The row height actually drawn: the caller's override, else the window's.
@@ -121,17 +130,21 @@ struct TVGuideView: View {
         return (start, max(1, CGFloat(minutes) * resolvedPixelsPerMinute))
     }
 
-    private var hasPrograms: Bool { rows.contains { !$0.programs.isEmpty } }
+
 
     var body: some View {
         let rows = self.rows
         if rows.isEmpty {
             emptyState("No guide data")
-        } else if !hasPrograms {
-            // Channels resolved but nothing joined to them. Silently drawing
-            // bare logos hides the cause, so name which failure mode this is.
-            emptyState(emptyLaneMessage)
         } else {
+            // **No "nothing is linked to EPG" branch any more.**
+            //
+            // It used to replace the whole grid whenever no row in view had
+            // programmes, which swallowed the guide for a category like
+            // "24/7 Streams" where no channel carries EPG at all. Every row now
+            // draws a labelled grey filler bar instead, which names the same
+            // condition per channel and stays tappable — a diagnostic that hides
+            // working UI is worse than one the rows tell you themselves.
             grid(rows: rows)
         }
     }
@@ -267,8 +280,25 @@ struct TVGuideView: View {
         // every block in the row, and there can be dozens of them.
         let nameWidth = channelNameWidth(row.channel.displayName)
 
+        // A channel the EPG has nothing for gets one filler bar spanning the
+        // whole timeline, so it still has a row you can see, search for and
+        // tap. Substituted here rather than in `rows` because the span is the
+        // timeline's, and the timeline is derived from the real programmes —
+        // building it in `rows` would need the answer before it exists.
+        let programs =
+            row.programs.isEmpty
+            ? [
+                Program.placeholder(
+                    for: row.channel,
+                    from: timeline.start,
+                    to: timeline.start
+                        + TimeInterval(timeline.width / resolvedPixelsPerMinute) * 60
+                )
+            ]
+            : row.programs
+
         return ZStack(alignment: .topLeading) {
-            ForEach(row.programs) { program in
+            ForEach(programs) { program in
                 let left = CGFloat(program.startTime.timeIntervalSince(timeline.start) / 60)
                     * resolvedPixelsPerMinute
                 let blockWidth = CGFloat(program.duration / 60) * resolvedPixelsPerMinute
@@ -326,7 +356,7 @@ struct TVGuideView: View {
     /// is positioned in. A `GeometryReader` reports a frame late, which at 120Hz
     /// would be a permanent shimmer rather than a glitch you catch once.
     private func channelNameWidth(_ name: String) -> CGFloat {
-        let font = UIFont.systemFont(ofSize: metrics.guideSubtitleFont, weight: .semibold)
+        let font = PlatformFont.systemFont(ofSize: metrics.guideSubtitleFont, weight: .semibold)
         return (name as NSString).size(withAttributes: [.font: font]).width
     }
 
@@ -344,25 +374,6 @@ struct TVGuideView: View {
             .frame(maxWidth: .infinity, minHeight: 160)
     }
 
-    /// Names the specific failure so an empty guide is actionable.
-    private var emptyLaneMessage: String {
-        if guide.hasProgramsWithoutTvgIDs {
-            return """
-                The EPG returned \(guide.totalPrograms) programmes, but none \
-                carry a tvg_id to match channels on.
-                """
-        }
-        if guide.isEmpty {
-            return """
-                The EPG returned no programmes.
-                Check that an EPG source is configured and has been imported.
-                """
-        }
-        return """
-            None of these channels are linked to EPG data.
-            Set each channel's EPG source in Dispatcharr, or run Match EPG.
-            """
-    }
 }
 
 /// The lane's clip: one rounded bar per row, stacked.
@@ -459,6 +470,17 @@ struct GuideBlock: View {
     let onTap: () -> Void
 
     private var colors: (rest: RGBColor, active: RGBColor, foreground: Color) {
+        // A filler bar is grey and *flat*: `rest` and `active` are the same, so
+        // the progress fill draws nothing. A placeholder spans the whole
+        // timeline, so a progress edge would sweep across the row all day and
+        // read as a programme boundary that is not there.
+        if program.isPlaceholder {
+            let grey = GuideTint.placeholder.blended(
+                alpha: GuideTint.restAlpha, over: surface
+            )
+            return (grey, grey, grey.foreground)
+        }
+
         // Seeded per *programme*, not per channel: adjacent blocks in a row get
         // different hues, which is what makes the grid readable at a glance.
         let seed = program.title.isEmpty ? (channel.effectiveTvgID ?? "") : program.title
@@ -539,10 +561,10 @@ struct GuideBlockLabel: View {
     let scroll: GuideScrollPosition
 
     /// Type steps up with the row height it sits inside — see `Metrics`.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     /// How much of this block has scrolled in behind the pinned logo column.
@@ -552,13 +574,28 @@ struct GuideBlockLabel: View {
     private var hidden: CGFloat { scroll.x + overlap - leftOffset }
 
     /// Where the pinned header sits inside this block.
-    static let leadingInset: CGFloat = 10
+    static let leadingInset: CGFloat = 20
 
     /// Gap between the channel name and the time in the header.
+    ///
+    /// Independent of `leadingInset`: it is the space between two pieces of
+    /// text, not a distance from the block's edge. `headerFloor` used to
+    /// conflate the two.
     private let headerSpacing: CGFloat = 14
 
     /// How far *left* of a block the header is allowed to hang.
-    private var headerFloor: CGFloat { -(channelNameWidth + headerSpacing) }
+    ///
+    /// **Derived from `leadingInset`, not from `headerSpacing`.** The header
+    /// starts `leadingInset` inside the block, so to put the channel name's
+    /// right edge exactly on the block's leading edge — where the clip can hide
+    /// it — the offset has to undo that inset as well as the name's own width.
+    ///
+    /// This was `-(channelNameWidth + headerSpacing)`, which is the same number
+    /// only while `leadingInset == headerSpacing`. That held by accident until
+    /// the inset was raised to move the text off the logos, and the name then
+    /// stopped `leadingInset - headerSpacing` short of the edge — 6pt of the
+    /// last letter left showing inside the *next* block, on every row.
+    private var headerFloor: CGFloat { -(Self.leadingInset + channelNameWidth) }
 
     /// Where the header sits inside this block.
     private var headerPin: CGFloat { max(hidden, headerFloor) }
@@ -577,7 +614,12 @@ struct GuideBlockLabel: View {
                 // edge, and the block's clip does the hiding.
                 Text(channel.displayName)
                     .fontWeight(.semibold)
-                Text(program.startTime.clockLabel)
+                // A filler bar spans the whole timeline, so its start time is
+                // the window's rather than the programme's — printing it would
+                // be inventing a schedule the EPG never gave us.
+                if !program.isPlaceholder {
+                    Text(program.startTime.clockLabel)
+                }
                 //`airing` marks the block the
                 // playhead is inside.
                 if airing {
@@ -606,7 +648,8 @@ struct GuideBlockLabel: View {
         }
         .foregroundStyle(foreground)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        // Named, because `headerSpacing` is derived from it — see the note there.
+        // Named, because `headerFloor` has to undo exactly this to slide the
+        // channel name clear of the block — see the note there.
         .padding(.leading, Self.leadingInset)
         .padding(.trailing, 10)
         .padding(.vertical, 8)
@@ -647,10 +690,10 @@ struct GuideLogoTile: View {
 
     /// Only the fallback initial needs this - the tile's own width and height
     /// are handed down by `TVGuideView`, which has already resolved them.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     /// The plate the artwork sits on: its own if it has one, a light neutral if
@@ -660,7 +703,7 @@ struct GuideLogoTile: View {
         logoTileColor(plate: plate, seed: channel.effectiveTvgID ?? channel.uuid)
     }
 
-    private var plateWidth: CGFloat { width - Self.horizontalInset }
+    private var plateWidth: CGFloat { width * 1.15 - Self.horizontalInset }
     private var plateHeight: CGFloat { height - Self.verticalInset }
 
     var body: some View {
@@ -672,7 +715,7 @@ struct GuideLogoTile: View {
                     case .success(let image):
                         // No button here — the whole tile is the button, wrapped
                         // by the logo column in `TVGuideView.grid`.
-                        image.resizable().scaledToFit()
+                        image.resizable().scaledToFit().padding(6)
                     case .failure:
                         Image(systemName: "tv")
                             .foregroundStyle(background.foreground.opacity(0.6))

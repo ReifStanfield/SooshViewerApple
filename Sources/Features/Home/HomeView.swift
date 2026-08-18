@@ -18,6 +18,28 @@ struct HomeView: View {
     /// The channel whose player is open, or nil. This *is* the navigation state.
     @State private var playingChannel: Channel?
 
+    /// The multiview session, if tiles are up.
+    @Environment(MultiviewModel.self) private var multiview
+
+    /// One door for every channel tap on this screen.
+    ///
+    /// **Multiview changes what tapping a channel means**, and it has to change
+    /// it everywhere at once — a carousel card, a guide block, a search result.
+    /// Routing every site through here is what stops "add to the tiles" from
+    /// working on some rows and opening full screen on others.
+    private func open(_ channel: Channel) {
+        guard multiview.isActive else {
+            playingChannel = channel
+            return
+        }
+        // Tiles are up, so the tap belongs to them whether or not there is room.
+        // Falling through to full screen when the grid is full would replace the
+        // multiview you are watching with a single stream, which is the opposite
+        // of what the tap asked for.
+        multiview.add(channel: channel, home: model)
+    }
+
+
     /// The category whose page is open, or nil. Same pattern: state-driven, so a
     /// double tap cannot push two copies of the page.
     @State private var openCategory: Category?
@@ -41,10 +63,10 @@ struct HomeView: View {
     @State private var programDetail: GuideSelection?
 
     /// Cards, tiles and guide rows all step up at regular width — see `Metrics`.
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     #if os(tvOS)
@@ -55,15 +77,25 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             content
-                // **Inside the stack, not on the shell around it.**
+                // **Inside the stack on iOS, and *only* on iOS.**
                 //
-                // `SidebarShell` also asks for the backdrop, and on tvOS that is
-                // where it lands — but on iOS a `NavigationStack` paints the
-                // opaque system background over anything behind it, so a
-                // backdrop applied outside is invisible. The same trap the
-                // project notes record for `TabView`. Applied to the stack's own
-                // content, it sits above that system fill.
-                .appBackground()
+                // On iOS a `NavigationStack` paints the opaque system background
+                // over anything behind it, so a backdrop applied outside it is
+                // invisible — the same trap the project notes record for
+                // `TabView`. Applied to the stack's own content, it sits above
+                // that system fill.
+                //
+                // **On tvOS `TVSidebarShell` already draws it, and drawing it
+                // again here is what made the rail look like it had a
+                // background of its own.** `AppBackground` is a horizontal ramp
+                // across *its own frame*: the shell's spans the whole screen,
+                // while this one spans only the content, which is inset past the
+                // rail. Two ramps with different origins meet at the rail's edge
+                // and the seam reads as a separate sidebar backdrop. One
+                // backdrop, full width, behind everything.
+                #if !os(tvOS)
+                    .appBackground()
+                #endif
                 #if !os(tvOS)
                     .safeAreaInset(edge: .top, spacing: 0) {
                         HomeHeader(
@@ -81,7 +113,14 @@ struct HomeView: View {
                         // branch.
                         SettingsView()
                     }
-                    .toolbar(.hidden, for: .navigationBar)
+                    // The screen draws its own header, so the system bar would be
+                    // a second one. `.navigationBar` is a UIKit placement and is
+                    // unavailable on macOS, where a `NavigationStack` puts its
+                    // chrome in the window toolbar instead — see the
+                    // `.toolbar(.hidden)` on the Mac window in `SooshViewerApp`.
+                    #if os(iOS)
+                        .toolbar(.hidden, for: .navigationBar)
+                    #endif
                 #endif
                 // **`fullScreenCover` on tvOS, a push on iOS.**
                 //
@@ -127,7 +166,7 @@ struct HomeView: View {
                         selection: selection,
                         logoURL: model.catalog.logoURL(for: selection.channel),
                         palette: model.logoPalette,
-                        onPlay: { playingChannel = $0 }
+                        onPlay: { open($0) }
                     )
                 }
         }
@@ -163,11 +202,20 @@ struct HomeView: View {
                     // scope chips choose *what kind of thing* you are looking
                     // for, so a narrowed carousel-and-guide would not answer the
                     // question being asked.
-                    SearchResultsView(model: model) { playingChannel = $0 }
+                    SearchResultsView(model: model) { open($0) }
                 } else {
                     continueWatching
-                    categoriesGrid
+                    // **No categories on tvOS.** The grid is a browsing aid for
+                    // a pointer, and on a remote it is a wall of focus targets
+                    // between the carousel and the guide — every trip down the
+                    // page pays for it. The sidebar already carries the same
+                    // navigation, so on TV the home page is what is on now and
+                    // what is on next.
                     guideGrid
+                    
+                    #if !os(tvOS)
+                        categoriesGrid
+                    #endif
                 }
             }
             .padding(.vertical, Layout.screenMarginV + 16)
@@ -200,7 +248,7 @@ struct HomeView: View {
                 LazyHStack(spacing: Layout.isTV ? 40 : 16) {
                     ForEach(model.carouselChannels) { channel in
                         Button {
-                            playingChannel = channel
+                            open(channel)
                         } label: {
                             ChannelCard(
                                 channel: channel,
@@ -274,7 +322,7 @@ struct HomeView: View {
                     channels: model.guideChannels,
                     guide: model.guide,
                     logoURLFor: model.catalog.logoURL(for:),
-                    onLogoTap: { playingChannel = $0 },
+                    onLogoTap: { open($0) },
                     onProgramTap: { programDetail = $0 },
                     palette: model.logoPalette,
                     maxRows: guideRowBudget
@@ -311,8 +359,8 @@ struct HomeView: View {
 
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: metrics.categoryCardMinWidth),
-                                       spacing: Layout.isTV ? 40 : 16)],
-                    spacing: Layout.isTV ? 40 : 16
+                                       spacing: Layout.isTV ? 40 : 8)],
+                    spacing: Layout.isTV ? 40 : 8
                 ) {
                     ForEach(model.categories) { category in
                         Button {

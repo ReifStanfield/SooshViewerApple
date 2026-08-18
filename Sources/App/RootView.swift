@@ -31,27 +31,44 @@ struct RootView: View {
     /// and a compact width does not reset it.
     @State private var sidebarSelection: SidebarDestination = .home
 
-    #if os(iOS)
-        /// Regular width gets the sidebar, compact keeps the tab bar.
-        ///
-        /// Width, not idiom: an iPad in Slide Over is compact and should behave
-        /// like a phone, and a resized Mac window is the same story. Asking
-        /// "is this an iPad" would get both wrong.
-        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
+    /// Regular width gets the sidebar, compact keeps the tab bar.
+    ///
+    /// Width, not idiom: an iPad in Slide Over is compact and should behave like
+    /// a phone. Asking "is this an iPad" would get that wrong. A native Mac is
+    /// always regular and always takes the sidebar — see `RegularWidth`.
+    @RegularWidth private var isRegularWidth
+
+    /// The multiview session.
+    ///
+    /// Constructed inline rather than in `.task` — unlike the SwiftData
+    /// container, an empty tile list opens nothing and holds nothing, so the
+    /// throwaway instances SwiftUI builds on each rebuild cost nothing. It
+    /// acquires players only when a tile is added.
+    @State private var multiview = MultiviewModel()
 
     var body: some View {
         Group {
             if let model {
+                // Tiles are drawn *over* the whole app, never inside a screen,
+                // so browsing to the next channel leaves them playing.
                 tabs(model: model)
+                    .overlay { MultiviewOverlay(multiview: multiview) }
             } else {
                 ProgressView("Loading channels…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .environment(multiview)
         .task {
             guard model == nil else { return }
-            let created = HomeModel(client: client)
+            // Opened here rather than in an `init` or a `@State(initialValue:)`,
+            // for the reason in CLAUDE.md: initial values are constructed on
+            // every rebuild and thrown away, and this one opens a SQLite store.
+            //
+            // Not the SwiftUI `.modelContainer` scene modifier either — the
+            // cache belongs to `ChannelRepository`, and `Sources/Data/` has no
+            // SwiftUI imports to spend on it.
+            let created = HomeModel(client: client, cache: CatalogCache.makeDefault())
             model = created
             await created.load()
         }
@@ -65,7 +82,7 @@ struct RootView: View {
                 screen(destination, model: model)
             }
         #else
-            if horizontalSizeClass == .regular {
+            if isRegularWidth {
                 // iPad and Mac: the same navigation set as tvOS, in a panel that
                 // slides the content aside — see `SidebarShell`.
                 SidebarShell(selection: $sidebarSelection) { destination in
@@ -130,9 +147,30 @@ struct RootView: View {
         @Bindable var model: HomeModel
         @State private var playingChannel: Channel?
 
+        /// The multiview session, if tiles are up.
+        @Environment(MultiviewModel.self) private var multiview
+
+        /// One door for every channel tap on this screen.
+        ///
+        /// **Multiview changes what tapping a channel means**, and it has to change
+        /// it everywhere at once — a carousel card, a guide block, a search result.
+        /// Routing every site through here is what stops "add to the tiles" from
+        /// working on some rows and opening full screen on others.
+        private func open(_ channel: Channel) {
+            guard multiview.isActive else {
+                playingChannel = channel
+                return
+            }
+            // Tiles are up, so the tap belongs to them whether or not there is room.
+            // Falling through to full screen when the grid is full would replace the
+            // multiview you are watching with a single stream, which is the opposite
+            // of what the tap asked for.
+            multiview.add(channel: channel, home: model)
+        }
+
         var body: some View {
             NavigationStack {
-                SearchResultsView(model: model) { playingChannel = $0 }
+                SearchResultsView(model: model) { open($0) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .searchable(text: $model.searchText, prompt: "Search")
                     .searchScopes($model.searchScope) {

@@ -66,11 +66,11 @@ struct Metrics: Equatable, Sendable {
     static let compact = Metrics(
         cardWidth: 240,
         categoryCardMinWidth: 150,
-        categoryCardHeight: 92,
-        guideRowHeight: 60,
+        categoryCardHeight: 78,
+        guideRowHeight: 68,
         guidePixelsPerMinute: 8,
-        guideTitleFont: 18,
-        guideSubtitleFont: 15,
+        guideTitleFont: 16,
+        guideSubtitleFont: 12,
         guideLogoInitialFont: 20
     )
 
@@ -115,7 +115,7 @@ struct Metrics: Equatable, Sendable {
 
     /// Sizes for the current window.
     ///
-    /// Views get `isRegularWidth` from `@Environment(\.horizontalSizeClass)`.
+    /// Views get `isRegularWidth` from the `@RegularWidth` wrapper.
     /// tvOS ignores it: a television has exactly one size.
     static func resolve(isRegularWidth: Bool) -> Metrics {
         #if os(tvOS)
@@ -188,7 +188,7 @@ func logoPlateCornerRadius(forWidth width: CGFloat) -> CGFloat {
 /// shape when that changes; they are meant to read as the same object at
 /// different sizes.
 func guideLogoCornerRadius(forWidth width: CGFloat) -> CGFloat {
-    logoPlateCornerRadius(forWidth: width) * 1.6
+    logoPlateCornerRadius(forWidth: width) * 1.8
 }
 
 /// How many guide rows to draw for a given viewport.
@@ -252,6 +252,14 @@ enum GuideTint {
     /// grid can be made to pop this way.
     static let restAlpha: Double = 0.22
     static let activeAlpha: Double = 0.44
+
+    /// The bar for a channel the EPG says nothing about.
+    ///
+    /// Deliberately achromatic: every other bar's colour carries a hue that
+    /// means "this is a distinct programme", and a filler is the absence of
+    /// that. Grey is the one thing the seeded palette never produces, so it
+    /// cannot be mistaken for a real entry.
+    static let placeholder = RGBColor(r: 0x8A, g: 0x8C, b: 0x92)
 
     /// Stable string hash, matching the Dart original so a programme keeps its
     /// hue. Swift's `hashValue` is per-process seeded and cannot be used.

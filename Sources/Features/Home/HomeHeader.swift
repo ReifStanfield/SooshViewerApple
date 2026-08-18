@@ -20,7 +20,7 @@ struct HomeHeader: View {
     @FocusState private var searchFocused: Bool
 
     @Environment(\.sidebar) private var sidebar
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    @RegularWidth private var isRegularWidth
     @State private var blurRadius: CGFloat = 0
     var body: some View {
         // One container for the whole header so the pills share a backdrop and
@@ -35,7 +35,7 @@ struct HomeHeader: View {
                             sidebarButton(action: sidebar.open)
                                 .transition(.scale.combined(with: .opacity))
                         }
-                        if sizeClass == .compact {
+                        if !isRegularWidth {
                             pageMenu
                         } else {
                             Text("Home")
@@ -119,7 +119,7 @@ struct HomeHeader: View {
         } label: {
             HStack(spacing: 6) {
                 Text("Home")
-                    .font(.largeTitle.weight(.bold))
+                    .font(.system(size: 28).bold())
                 Image(systemName: "chevron.down")
                     .font(.title3.weight(.semibold))
             }
@@ -146,7 +146,7 @@ struct HomeHeader: View {
 
     @ViewBuilder
     private var settingsButton: some View {
-        if sizeClass == .compact {
+        if !isRegularWidth {
             Button(action: onSettings) {
                 Image(systemName: "gearshape")
                     .font(.title2)
@@ -207,8 +207,7 @@ struct HomeHeader: View {
                 .focused($searchFocused)
                 .foregroundStyle(.white)
                 .submitLabel(.search)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
+                .plainTextEntry()
 
             if !searchText.isEmpty {
                 Button {

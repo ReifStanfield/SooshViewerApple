@@ -15,6 +15,9 @@ import SwiftUI
 struct PlayerView: View {
     @State private var model: PlayerModel?
 
+    /// Whether this view's player now belongs to the multiview grid.
+    @State private var handedOff = false
+
     private let channel: Channel
     private let streamURL: URL?
     private let programs: [Program]
@@ -59,6 +62,10 @@ struct PlayerView: View {
             created.pokeControls()
         }
         .onDisappear {
+            // **Not torn down when it was handed to the grid.** The tile is
+            // playing this very model now; tearing it down here would stop the
+            // stream the pop-out was supposed to keep running.
+            guard !handedOff else { return }
             let leaving = model
             Task { await leaving?.teardown() }
         }
@@ -96,60 +103,64 @@ struct PlayerView: View {
                     model.pokeControls()
                 }
         #else
+            // Mac Catalyst compiles as iOS and takes this path too — the native
+            // Mac target that used to need its own thinner chrome is gone.
             iOSPlayer(model: model, engine: engine)
         #endif
     }
 
-    #if os(tvOS)
-        @Environment(\.dismiss) private var dismiss
+    // Shared by both engine paths: the FFmpeg player has no controls
+    // view of its own, so it reuses this connection state directly.
 
-        /// Connecting spinner and the retry path. Separate from the control
-        /// overlay so it stays up when the controls auto-hide.
-        @ViewBuilder
-        private func connectionOverlay(_ model: PlayerModel) -> some View {
-            switch model.state {
-            case .idle, .connecting:
-                VStack(spacing: 16) {
-                    ProgressView().controlSize(.large)
-                    if case .connecting(let attempt, let total) = model.state {
-                        Text("Connecting (\(attempt)/\(total))")
-                            .font(.title3)
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.black.opacity(0.35))
+    @Environment(\.dismiss) private var dismiss
 
-            case .failed(let message):
-                VStack(spacing: 20) {
-                    Image(systemName: "exclamationmark.triangle").font(.system(size: 64))
-                    Text("Can't play this channel").font(.title)
-                    Text(message)
+    /// The multiview session, for the "add to grid" control.
+    @Environment(MultiviewModel.self) private var multiview
+
+    /// Connecting spinner and the retry path. Separate from the control
+    /// overlay so it stays up when the controls auto-hide.
+    @ViewBuilder
+    private func connectionOverlay(_ model: PlayerModel) -> some View {
+        switch model.state {
+        case .idle, .connecting:
+            VStack(spacing: 16) {
+                ProgressView().controlSize(.large)
+                if case .connecting(let attempt, let total) = model.state {
+                    Text("Connecting (\(attempt)/\(total))")
                         .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    Button("Try again") { model.connect() }
+                        .foregroundStyle(.white.opacity(0.75))
                 }
-                .foregroundStyle(.white)
-                .padding(60)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.black.opacity(0.85))
-
-            case .playing:
-                EmptyView()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black.opacity(0.35))
+
+        case .failed(let message):
+            VStack(spacing: 20) {
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 64))
+                Text("Can't play this channel").font(.title)
+                Text(message)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Try again") { model.connect() }
+            }
+            .foregroundStyle(.white)
+            .padding(60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black.opacity(0.85))
+
+        case .playing:
+            EmptyView()
         }
-    #endif
+    }
 
     #if os(iOS)
-        @Environment(\.dismiss) private var dismiss
-
         private func iOSPlayer(model: PlayerModel, engine: AVPlayerEngine) -> some View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
                 VideoLayerView(player: engine.player) { layer in
-                    engine.attachPictureInPicture(to: layer)
+                    engine.adoptVideoLayer(layer)
                 }
                 .ignoresSafeArea()
                 // A plain layer has no gestures of its own, so the show/hide tap
@@ -159,7 +170,25 @@ struct PlayerView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.toggleControls() }
 
-                PlayerControlsView(model: model, engine: engine) { dismiss() }
+                PlayerControlsView(
+                    model: model,
+                    engine: engine,
+                    logoURL: logoURL,
+                    onBack: { dismiss() },
+                    // **The full-screen player is torn down as it tiles.** The
+                    // tile builds its own `PlayerModel`, so leaving this one
+                    // running would mean two connections to the same channel —
+                    // and the provider counts both. `onDisappear` already calls
+                    // `teardown()`, so dismissing is the teardown.
+                    onMultiview: {
+                        // **Hands this exact player to the grid — no second
+                        // connection, no second join.** Ownership moves with it,
+                        // which is why `handedOff` exists below.
+                        multiview.adopt(channel: channel, logoURL: logoURL, model: model)
+                        handedOff = true
+                        dismiss()
+                    }
+                )
 
                 failureOverlay(model)
             }

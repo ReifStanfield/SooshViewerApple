@@ -2,6 +2,7 @@ import AVFoundation
 // AVPictureInPictureController lives in AVKit, not AVFoundation — the split is
 // "media pipeline" vs "media UI", and PiP counts as UI.
 import AVKit
+import os
 import Observation
 
 /// Playback through AVPlayer.
@@ -30,6 +31,16 @@ final class AVPlayerEngine: PlaybackEngine {
 
     private(set) var lastError: String?
     private(set) var isPlaying: Bool = false
+
+    /// True when the player wants to play but has nothing to play yet.
+    ///
+    /// **Distinct from `!isPlaying`, and the difference is the whole complaint.**
+    /// `timeControlStatus` has three states, not two: paused, *waiting to play at
+    /// the specified rate*, and playing. Collapsing the middle one into "paused"
+    /// is what left a viewer returning from AirPlay looking at a black screen
+    /// with a play button, unable to tell whether it was stopped or still
+    /// loading.
+    private(set) var isBuffering: Bool = false
     private var audioChannelCount: Int?
 
     /// KVO tokens. Held so they can be invalidated — an observation that
@@ -74,6 +85,10 @@ final class AVPlayerEngine: PlaybackEngine {
     /// throwaway engine SwiftUI constructed during a rebuild kicked the shared
     /// session. Configure the session when you are about to use it, not when you
     /// are merely allocated.
+    ///
+    /// This ran under `#if !os(macOS)` for the native Mac target, where
+    /// `AVAudioSession` is unavailable rather than merely deprecated. That
+    /// target is gone; Catalyst compiles as iOS and does have the class.
     private func configureAudioSession() {
         guard !audioSessionReady else { return }
         audioSessionReady = true
@@ -86,9 +101,132 @@ final class AVPlayerEngine: PlaybackEngine {
         }
     }
 
+    /// The layer the picture is drawn into.
+    ///
+    /// Weak: the view owns it, and an engine outliving a torn-down view must not
+    /// keep it alive. Held at all because two things need it — Picture in
+    /// Picture, and the reattach after an external route ends.
+    @ObservationIgnored private weak var videoLayer: AVPlayerLayer?
+
+    /// When the current item was handed to the player, for measuring how long
+    /// the first frame takes to appear.
+    @ObservationIgnored private var itemStartedAt: ContinuousClock.Instant?
+
+    /// Takes the layer the video is drawn into.
+    ///
+    /// Replaces the old PiP-only hook: the layer matters beyond PiP now, and
+    /// tvOS — which has no PiP — still wants the reattach behaviour.
+    func adoptVideoLayer(_ layer: AVPlayerLayer) {
+        videoLayer = layer
+        observeFirstFrame(on: layer)
+        #if !os(tvOS)
+            attachPictureInPicture(to: layer)
+        #endif
+    }
+
+    /// Times the gap between playback starting and the layer having a picture.
+    ///
+    /// **`isReadyForDisplay` is the only honest signal for "there is a frame on
+    /// screen".** `presentationSize` becoming non-zero only means the *stream*
+    /// declared a size, which happens well before anything is drawn — which is
+    /// why audio can be running over a frozen or black picture and every other
+    /// indicator still looks healthy.
+    private func observeFirstFrame(on layer: AVPlayerLayer) {
+        layerObservation?.invalidate()
+        // `.initial` as well as `.new`: a layer that is already showing a
+        // picture when it is adopted never *changes*, and would report nothing.
+        layerObservation = layer.observe(\.isReadyForDisplay, options: [.new, .initial]) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            Task { @MainActor [weak self] in
+                guard let self, let itemStartedAt else { return }
+                let elapsed = ContinuousClock.now - itemStartedAt
+                Self.log.notice("first frame on screen after \(elapsed.description, privacy: .public)")
+                self.itemStartedAt = nil
+            }
+        }
+    }
+
+    @ObservationIgnored private var layerObservation: NSKeyValueObservation?
+
+    /// Rebuilds the stream when AirPlay hands playback back.
+    ///
+    /// **Straight to a rebuild, rather than trying to revive the old item.**
+    /// Reattaching the layer and calling `play()` was tried first for two
+    /// rounds, on the reasoning that it costs nothing when it works. It does not
+    /// work: while the route was external the *receiver* consumed the stream, so
+    /// the local item is left at a position the sliding window discarded long
+    /// ago, with no seekable range to jump to. It cannot be revived, only
+    /// replaced — and leaving the stall watchdog to reach that conclusion spends
+    /// ten seconds proving something already known.
+    ///
+    /// The arithmetic, measured on Catalyst: a rebuild reaches a playable window
+    /// in 0.7s when the upstream bursts on connect, a few seconds when it does
+    /// not, and a first frame 3.15s after that — so ~4-9s in total. Going
+    /// through the watchdog costs all of that plus its ten-second interval.
+    ///
+    /// The price is one upstream connection per AirPlay toggle: the same as a
+    /// channel change, and bounded by a user action rather than by a loop.
+    private func handleExternalRouteEnded() {
+        Self.log.notice("external route ended, rebuilding the stream")
+
+        // Cheap, and the replacement item draws into this same layer.
+        if let videoLayer {
+            videoLayer.player = nil
+            videoLayer.player = player
+        }
+
+        // A route change is a legitimate, user-caused reason to rebuild, not the
+        // runaway reconnecting the cooldown exists to prevent.
+        lastRecoveryAt = nil
+        stalledTicks = 0
+        stalledPosition = nil
+        lastCatchUpAt = nil
+        positionAtLastCatchUp = nil
+        userPaused = false
+
+        recoverWedgedStream()
+    }
+
+    /// The live rewrap, when this stream is a raw transport stream.
+    ///
+    /// Held so it can be torn down with the item — it owns the upstream socket,
+    /// and leaking one leaves Dispatcharr counting the channel as in use.
+    @ObservationIgnored private var rewrap: TSRewrapSession?
+
+    /// Whether `url` is a raw MPEG-TS body rather than something AVFoundation
+    /// can open directly.
+    ///
+    /// Matched on the path rather than a file extension: these URLs end in a
+    /// channel UUID, not `.ts`.
+    static func needsRewrap(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return path.contains("/proxy/ts/") || path.hasSuffix(".ts")
+    }
+
     func open(url: URL, headers: [String: String]) async throws {
         configureAudioSession()
+        // Captured before `stop()`, which clears it, and before the rewrap
+        // rewrites `url` to the loopback playlist — recovery needs the
+        // *upstream*, not the local server that just failed.
+        let source = (url: url, headers: headers)
         await stop()
+        currentSource = source
+
+        // **Raw transport streams are wrapped in HLS before AVFoundation sees
+        // them.** This is where the FFmpeg dependency used to be. AVFoundation
+        // decodes MPEG-TS — it is HLS's original segment container, and these
+        // channels are ordinary H.264/AAC — but it cannot consume an endless,
+        // unindexed TS body. `TSRewrapSession` holds that socket open, cuts the
+        // bytes at keyframes and serves them back as a live playlist on
+        // loopback, so the same picture arrives through the HLS client Apple
+        // already wrote. See Sources/Playback/TransportStream.
+        var url = url
+        if Self.needsRewrap(url) {
+            let session = TSRewrapSession(upstreamURL: url, headers: headers)
+            rewrap = session
+            url = try await session.start()
+
+        }
 
         // `AVURLAssetHTTPHeaderFieldsKey` is how everyone passes auth headers to
         // AVFoundation, but it is not in the public headers. The supported
@@ -96,25 +234,70 @@ final class AVPlayerEngine: PlaybackEngine {
         // reimplementing HLS playlist fetching by hand. Dispatcharr's
         // `/proxy/ts/stream/` allows anonymous access, so this path is only
         // exercised if an apiKey is ever supplied.
-        let options: [String: Any] = headers.isEmpty
+        //
+        // On the rewrapped path there is nothing to authenticate to: the
+        // headers were spent on the upstream request inside `TSRewrapSession`,
+        // and what AVFoundation is loading is our own loopback server.
+        var options: [String: Any] = (headers.isEmpty || rewrap != nil)
             ? [:]
             : ["AVURLAssetHTTPHeaderFieldsKey": headers]
 
+        // **These streams are endless.** The rewrap gives them an index but not
+        // an ending — the playlist carries no `EXT-X-ENDLIST`, because it is
+        // live. Asking AVFoundation for precise timing still means reading ahead
+        // for a duration that is never coming.
+        options[AVURLAssetPreferPreciseDurationAndTimingKey] = false
+
         let asset = AVURLAsset(url: url, options: options)
         let item = AVPlayerItem(asset: asset)
+
+        // **`preferredForwardBufferDuration` is left at the default of 0.**
+        //
+        // It was 2, to start on a small buffer rather than AVPlayer's automatic
+        // one, on the reasoning that live television would rather be two seconds
+        // behind than wait. On a rewrapped live playlist that value is smaller
+        // than a single segment, and the item then never reaches
+        // `.readyToPlay` at all: status stays `.unknown`, `tracks` stays empty,
+        // and **nothing is written to `errorLog()`** — the failure is completely
+        // silent, which is why it survived so long.
+        //
+        // 0 means "choose automatically", which is the only setting that works
+        // here. Do not put a number back without checking that a channel still
+        // starts in the *app* — a bare `AVPlayer` in a command-line harness does
+        // not set this property and so never reproduced the bug.
+
         observe(item)
         player.replaceCurrentItem(with: item)
         player.play()
 
-        // Track lists are loaded, not read: the modern AVFoundation accessors
-        // are async because the asset may still be fetching its playlist. The
-        // sync `mediaSelectionGroup(forMediaCharacteristic:)` is deprecated and
-        // would block. Failures here are non-fatal — the stream plays, the
-        // pickers are just empty.
-        audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
-        subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
-        await refreshAudioChannelCount(for: item)
+        // **Metadata is loaded alongside playback, never ahead of it.**
+        //
+        // These three awaits used to sit here, before `open()` returned — and
+        // `PlayerModel` does not start watching for playback until it does. On a
+        // stream with no playlist to parse they can take seconds or hang
+        // outright, which delayed the *detection* of a stream that was already
+        // playing, started the stall and overall clocks late, and showed
+        // "connecting" over a live picture.
+        //
+        // Nothing here affects playback: it fills the audio and subtitle
+        // pickers. It belongs off the connect path entirely.
+        metadataTask?.cancel()
+        metadataTask = Task { [weak self] in
+            let audio = try? await asset.loadMediaSelectionGroup(for: .audible)
+            let subtitles = try? await asset.loadMediaSelectionGroup(for: .legible)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                // The user may already be on another channel.
+                guard let self, self.player.currentItem === item else { return }
+                self.audioGroup = audio
+                self.subtitleGroup = subtitles
+            }
+            await self?.refreshAudioChannelCount(for: item)
+        }
     }
+
+    /// Loads the track lists without blocking the connect path.
+    @ObservationIgnored private var metadataTask: Task<Void, Never>?
 
     // MARK: - Stream metadata
 
@@ -260,9 +443,55 @@ final class AVPlayerEngine: PlaybackEngine {
             },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
                 let playing = player.timeControlStatus == .playing
-                Task { @MainActor [weak self] in self?.isPlaying = playing }
+                let buffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                Task { @MainActor [weak self] in
+                    self?.isPlaying = playing
+                    self?.isBuffering = buffering
+                }
+            },
+            player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
+                let external = player.isExternalPlaybackActive
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // Logged in both directions, and compared against our own
+                    // record rather than the KVO's `.old` — when this reported
+                    // "neither line, still stuck", the first thing worth knowing
+                    // was whether the route change was seen at all.
+                    Self.log.notice("external playback \(external ? "began" : "ended", privacy: .public)")
+                    let wasExternal = self.isExternalRoute
+                    self.isExternalRoute = external
+                    // Only the *end* needs handling; the start is AVFoundation
+                    // handing the stream off, which it does cleanly.
+                    if wasExternal, !external { self.handleExternalRouteEnded() }
+                }
             },
         ]
+        itemStartedAt = .now
+
+        // **Live-edge recovery**, only on the rewrapped path.
+        //
+        // A normal HLS asset or a file has an ending and can be left where the
+        // user put it. A rewrapped live channel cannot: the upstream keeps
+        // running while the app is occluded — moving to another full-screen app
+        // on Catalyst is the reliable way to see it — so the playlist window
+        // slides on while playback stands still, and past ~25s the segment the
+        // player wants has been evicted. See `LiveEdgePolicy`.
+        if rewrap != nil {
+            startLiveEdgeWatch()
+
+            // A stall is the fast signal for the same condition. The periodic
+            // check would catch it a second later anyway, but a stall is exactly
+            // when a second of black is most obvious.
+            stallObserver = NotificationToken(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.playbackStalledNotification,
+                    object: item,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.catchUpToLiveEdge() }
+                }
+            )
+        }
 
         // A stream that dies mid-playback never changes `status` — it is already
         // .readyToPlay. This is the only signal for it.
@@ -279,31 +508,424 @@ final class AVPlayerEngine: PlaybackEngine {
         )
     }
 
+    // MARK: - Live-edge recovery
+
+    /// The wall-clock ticker driving catch-up and stall detection.
+    @ObservationIgnored private var watchTask: Task<Void, Never>?
+
+    /// Our own record of the route, so the end of one is detected from a value
+    /// we control rather than from KVO change bookkeeping.
+    @ObservationIgnored private var isExternalRoute = false
+
+    /// Whether this item has ever been ready to play.
+    ///
+    /// The stall watchdog only applies *after* that. Before it, a stream is
+    /// merely starting, and `PlayerModel`'s connect loop already owns that phase
+    /// with its own timeout and retries — a second recovery running underneath
+    /// it would fight it and open extra upstream connections.
+    @ObservationIgnored private var hasBeenReady = false
+
+    @ObservationIgnored private var stallObserver: NotificationToken?
+
+    /// Dumps everything AVFoundation will tell us about a stream that is not
+    /// playing yet.
+    ///
+    /// **This is here because reasoning from the outside kept being wrong.**
+    /// `errorLog()` in particular carries faults that never surface as an item
+    /// error and never reach `lastError` — a rejected playlist tag, a stale
+    /// reload, a segment that 404'd — and it was reading those that identified
+    /// the last two playback bugs. Cheap enough to leave on: it only runs on the
+    /// live path, only while no frame has arrived, and only every few seconds.
+    func logDiagnostics(reason: String) {
+        guard let item = player.currentItem else {
+            Self.log.notice("[\(reason)] no current item")
+            return
+        }
+        let size = item.presentationSize
+        let loaded = item.loadedTimeRanges.map(\.timeRangeValue).map {
+            String(format: "%.1f…%.1f", CMTimeGetSeconds($0.start), CMTimeGetSeconds($0.end))
+        }
+        let seekable = item.seekableTimeRanges.map(\.timeRangeValue).map {
+            String(format: "%.1f…%.1f", CMTimeGetSeconds($0.start), CMTimeGetSeconds($0.end))
+        }
+        // **`privacy: .public` on every value.** os_log redacts interpolated
+        // values by default, and on Catalyst this whole line came back as
+        // `<private>` — a diagnostic that tells you nothing is worse than none,
+        // because it looks like you already checked.
+        let summary = """
+        [\(reason)] status=\(item.status.rawValue) rate=\(self.player.rate) \
+        timeControl=\(self.player.timeControlStatus.rawValue) \
+        pos=\(String(format: "%.2f", CMTimeGetSeconds(item.currentTime()))) \
+        size=\(Int(size.width))x\(Int(size.height)) tracks=\(item.tracks.count) \
+        loaded=\(loaded) seekable=\(seekable) \
+        likelyToKeepUp=\(item.isPlaybackLikelyToKeepUp) bufferEmpty=\(item.isPlaybackBufferEmpty)
+        """
+        Self.log.notice("\(summary, privacy: .public)")
+        if let events = item.errorLog()?.events, !events.isEmpty {
+            for event in events.suffix(3) {
+                Self.log.error("[\(reason, privacy: .public)] errorLog \(event.errorStatusCode, privacy: .public): \(event.errorComment ?? "-", privacy: .public)")
+            }
+        }
+        if let access = item.accessLog()?.events.last {
+            let accessSummary = """
+            [\(reason)] accessLog stalls=\(access.numberOfStalls) \
+            dropped=\(access.numberOfDroppedVideoFrames) \
+            segmentsDownloaded=\(access.numberOfMediaRequests) \
+            indicatedBitrate=\(Int(access.indicatedBitrate))
+            """
+            Self.log.notice("\(accessSummary, privacy: .public)")
+        }
+    }
+
+    private static let log = Logger(subsystem: "com.soosh.viewer", category: "AVPlayerEngine")
+
+    /// Ticks since the watch started, so diagnostics can be throttled.
+    @ObservationIgnored private var watchTicks = 0
+
+    private func startLiveEdgeWatch() {
+        stopLiveEdgeWatch()
+        watchTicks = 0
+        lastCatchUpAt = nil
+        positionAtLastCatchUp = nil
+        stalledTicks = 0
+        stalledPosition = nil
+        hasBeenReady = false
+        userPaused = false
+        isExternalRoute = player.isExternalPlaybackActive
+        // **A wall clock, not `addPeriodicTimeObserver`.**
+        //
+        // The observer fires on *playback time* advancing, so it goes quiet
+        // exactly when playback stops — which is the only moment any of this
+        // matters. It appeared to work for a while only because our own seeks
+        // were nudging the timebase and keeping it alive; once the seek storm
+        // was rate-limited away, the detector went silent with it and a stuck
+        // stream produced no catch-up, no stall report and no recovery. That is
+        // a watchdog driven by the thing it is watching.
+        //
+        // `Task.sleep` keeps ticking whatever the player is doing.
+        watchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+
+                watchTicks += 1
+                // Every 2s, and only until a frame has actually arrived.
+                if watchTicks % 2 == 0, (snapshot.width ?? 0) == 0 {
+                    logDiagnostics(reason: "connecting")
+                }
+                resumeIfStoppedUnexpectedly()
+                checkForStall()
+                catchUpToLiveEdge()
+            }
+        }
+    }
+
+    /// Rebuilds the stream when the player has been waiting for data that is
+    /// not coming.
+    ///
+    /// The state this exists for: `timeControlStatus` stuck at
+    /// `.waitingToPlayAtSpecifiedRate` with the position frozen. Reported as
+    /// loading forever on returning from AirPlay — the receiver had been
+    /// consuming the stream, so the local player resumed at a position the
+    /// window discarded long ago, and with no seekable range to jump to there
+    /// was nothing for the catch-up to correct.
+    private func checkForStall() {
+        guard let item = player.currentItem else {
+            stalledTicks = 0
+            return
+        }
+
+        if item.status == .readyToPlay { hasBeenReady = true }
+        guard hasBeenReady else {
+            stalledTicks = 0
+            return
+        }
+
+        // A failed item is not going to recover on its own, and waiting out the
+        // full interval only delays the rebuild.
+        if item.status == .failed {
+            Self.log.error("item failed, rebuilding")
+            stalledTicks = 0
+            recoverWedgedStream()
+            return
+        }
+
+        // **An item that never becomes ready counts as stuck.** The first
+        // version required `.readyToPlay` before it would count anything, so a
+        // stream that came back from AirPlay in some other state reset the
+        // counter every tick and could never trip the watchdog — which is
+        // exactly the "neither line, still stuck" report.
+        let position = CMTimeGetSeconds(item.currentTime())
+        let frozen = stalledPosition.map { abs(position - $0) < 0.01 } ?? false
+        let stuck: Bool
+        if item.status != .readyToPlay {
+            stuck = true
+        } else {
+            // Waiting *and* not moving. Either alone is normal: a healthy stream
+            // waits briefly at a rebuffer, and a paused one does not move.
+            stuck = player.timeControlStatus == .waitingToPlayAtSpecifiedRate && frozen
+        }
+
+        guard stuck, player.timeControlStatus != .paused else {
+            stalledTicks = 0
+            stalledPosition = position.isFinite ? position : nil
+            return
+        }
+
+        stalledTicks += 1
+        guard stalledTicks >= Self.stallLimit else { return }
+
+        Self.log.error("waiting for data for \(Self.stallLimit, privacy: .public)s with no movement")
+        logDiagnostics(reason: "stalled")
+        stalledTicks = 0
+        recoverWedgedStream()
+    }
+
+    @ObservationIgnored private var stalledPosition: TimeInterval?
+
+    /// Rebuilds the stream from the upstream URL.
+    ///
+    /// Reuses `open()` rather than inventing a second teardown path, so the
+    /// pause-before-release rule and the rewrap's socket handling apply exactly
+    /// as they do on a channel change. Bounded to once a minute: if a rebuild
+    /// does not help, doing it repeatedly is a reconnect loop against a provider
+    /// that counts connections.
+    private func recoverWedgedStream() {
+        guard let currentSource else { return }
+        if let lastRecoveryAt, ContinuousClock.now - lastRecoveryAt < .seconds(60) {
+            Self.log.error("stream wedged again within the recovery interval, leaving it alone")
+            return
+        }
+        lastRecoveryAt = ContinuousClock.now
+        Self.log.notice("rebuilding wedged stream")
+
+        Task { [weak self] in
+            try? await self?.open(url: currentSource.url, headers: currentSource.headers)
+        }
+    }
+
+    private func stopLiveEdgeWatch() {
+        watchTask?.cancel()
+        watchTask = nil
+        stallObserver = nil
+    }
+
+    /// When the last catch-up seek was issued, so they cannot stack up.
+    @ObservationIgnored private var lastCatchUpAt: ContinuousClock.Instant?
+
+    /// Where playback was at the previous catch-up.
+    ///
+    /// **This is how a wedged player is told apart from a lagging one.** A
+    /// player that is merely behind moves after a seek; a wedged one does not
+    /// move at all. Measured from a real session: the window slid from
+    /// `96.25…107.73` to `135.15…146.64` — forty seconds — while `currentTime()`
+    /// stayed pinned at 100.26 across eight consecutive corrections.
+    @ObservationIgnored private var positionAtLastCatchUp: TimeInterval?
+
+    /// Consecutive one-second ticks spent waiting for data that never comes.
+    ///
+    /// **Deliberately blind to the cause.** The route-end handler below covers
+    /// AirPlay specifically, but it depends on a KVO firing, and the same dead
+    /// end is reachable other ways — a window that slid past the position while
+    /// something else held the player, a seek that landed nowhere. Counting
+    /// "wants to play, has nothing, is not moving" catches all of them with one
+    /// rule, and needs no theory about which one happened.
+    @ObservationIgnored private var stalledTicks = 0
+
+    /// How long to let that run before rebuilding. Ten seconds is well past any
+    /// honest rebuffer on a local server and well short of a viewer giving up.
+    private static let stallLimit = 10
+
+    /// When the stream was last rebuilt because seeking could not revive it.
+    @ObservationIgnored private var lastRecoveryAt: ContinuousClock.Instant?
+
+    /// The upstream this engine is playing, kept so a wedged stream can be
+    /// rebuilt from scratch without the view layer having to notice.
+    @ObservationIgnored private var currentSource: (url: URL, headers: [String: String])?
+
+    /// Jumps to the live edge when playback has fallen too far behind it.
+    private func catchUpToLiveEdge() {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+
+        // **Not while AirPlay is driving playback.** On an external route the
+        // receiver owns the position and does its own buffering; seeking from
+        // this side fights it, and each correction knocks the receiver's timebase
+        // out again, which is what produced a stream that rapidly played and
+        // paused after a couple of AirPlay sessions on Catalyst.
+        guard !player.isExternalPlaybackActive else { return }
+
+        // **Not while deliberately paused.** A paused live stream falls behind
+        // the window by design — that is what pausing live TV *is*. Correcting
+        // it here would seek and then call `play()` below, restarting playback
+        // the viewer had stopped. The correction belongs on the next tick after
+        // they resume, which is where it now happens.
+        guard player.timeControlStatus != .paused else { return }
+
+        // **One correction at a time.** A seek that does not take — because the
+        // route changed under us, or the window moved again while it was in
+        // flight — would otherwise be re-issued every second, and a seek per
+        // second on a live stream is indistinguishable from a stutter. Bounding
+        // it means the worst case degrades to one visible jump per interval
+        // rather than a storm.
+        let attemptedAt = ContinuousClock.now
+        if let lastCatchUpAt, attemptedAt - lastCatchUpAt < .seconds(5) { return }
+        // The seekable range *is* the server's sliding window, republished by
+        // AVFoundation — which is why this needs no knowledge of segment count
+        // or target duration.
+        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
+
+        let start = CMTimeGetSeconds(range.start)
+        let end = CMTimeGetSeconds(range.end)
+        let now = CMTimeGetSeconds(item.currentTime())
+        guard now.isFinite, start.isFinite, end.isFinite else { return }
+
+        guard let target = LiveEdgePolicy.catchUpTarget(
+            currentTime: now,
+            seekableStart: start,
+            seekableEnd: end
+        ) else { return }
+
+        // **Tolerance is asymmetric on purpose.** `.zero` after and infinity
+        // before lets AVFoundation land on the nearest earlier sync sample
+        // rather than decoding forward to hit an exact time it does not need to.
+        // A jump to live is a visible discontinuity for the viewer, so it is
+        // worth a line every time — a *repeated* jump is the signature of the
+        // policy fighting the stream rather than correcting it.
+        Self.log.notice("""
+        catch-up seek: pos=\(String(format: "%.2f", now), privacy: .public) \
+        seekable=\(String(format: "%.2f", start), privacy: .public)…\(String(format: "%.2f", end), privacy: .public) \
+        target=\(String(format: "%.2f", target), privacy: .public)
+        """)
+
+        // **A seek that changed nothing means seeking is not the answer.**
+        // If playback has not advanced at all since the last correction, the
+        // item is not lagging behind the window — it has stopped consuming, and
+        // another seek is one more no-op on a pile of them. Rebuild the stream
+        // instead; that is the only thing that has ever revived this state.
+        if let positionAtLastCatchUp, abs(now - positionAtLastCatchUp) < 0.01 {
+            logDiagnostics(reason: "wedged")
+            lastCatchUpAt = attemptedAt
+            recoverWedgedStream()
+            return
+        }
+
+        lastCatchUpAt = attemptedAt
+        positionAtLastCatchUp = now
+
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: .positiveInfinity,
+            toleranceAfter: .zero
+        ) { [weak self] finished in
+            // **Resume unconditionally, because a deliberate pause was already
+            // excluded above.** By the time a seek is issued, `timeControlStatus`
+            // is either `.playing` or `.waitingToPlayAtSpecifiedRate` — the
+            // `.paused` case returned long before this point. Both of the
+            // remaining states mean the viewer wants playback.
+            //
+            // This used to test for `.playing` specifically, which is the same
+            // mistake as reading `timeControlStatus` as two states: a correction
+            // made while the stream was still buffering left it stopped, needing
+            // a manual play. Coming back from AirPlay is exactly that case.
+            guard finished else { return }
+            MainActor.assumeIsolated { self?.player.play() }
+        }
+    }
+
     /// Gives the upstream session back, as promptly as the platform allows.
     func stop() async {
+        // Cancelled first: a metadata load still in flight holds the asset, and
+        // the asset holds the socket this is trying to give back.
+        metadataTask?.cancel()
+        metadataTask = nil
+
+        // Before the item goes: a periodic observer left on a player whose item
+        // has been replaced keeps firing against the new one.
+        stopLiveEdgeWatch()
+
         player.pause()
         player.replaceCurrentItem(with: nil)
 
+        // **After the pause, and after the item is gone.** The pause-before-
+        // release rule now has a second half: the socket Dispatcharr counts is
+        // the rewrap's, not AVPlayer's, so tearing the session down while the
+        // player is still reading would leave the player fetching segments from
+        // a server that has stopped being fed. Player first, then the session.
+        if let rewrap {
+            self.rewrap = nil
+            await rewrap.stop()
+        }
+
         observations.forEach { $0.invalidate() }
         observations.removeAll()
+        // **`layerObservation` is deliberately not torn down here.** It belongs
+        // to the layer, which outlives any one item, and `stop()` runs at the
+        // start of every `open()` — invalidating it here meant it survived
+        // exactly one channel and then silently never fired again.
+
         failureObserver = nil
 
         lastError = nil
         isPlaying = false
+        isBuffering = false
         audioChannelCount = nil
+        // Cleared so a player that has been torn down cannot later decide to
+        // rebuild itself. `recoverWedgedStream` reads this before it spawns its
+        // task, so an in-flight recovery still completes.
+        currentSource = nil
+    }
+
+    /// Silences this engine without pausing it.
+    ///
+    /// Multiview needs several streams decoding while only one is audible —
+    /// pausing the others would defeat the point, and four mixed audio tracks
+    /// are unintelligible.
+    func setMuted(_ muted: Bool) {
+        player.isMuted = muted
     }
 
     func playOrPause() {
         if player.timeControlStatus == .playing {
+            // Recorded so the watchdog below can tell a pause the viewer asked
+            // for from one the pipeline inflicted. Without the distinction it
+            // can only choose between overriding deliberate pauses and leaving
+            // the stream stopped after a recovery — and it has done both.
+            userPaused = true
             player.pause()
         } else {
+            userPaused = false
             player.play()
         }
     }
 
+    /// Whether playback is stopped because the viewer stopped it.
+    @ObservationIgnored private var userPaused = false
+
+    /// Restarts playback that stopped without anyone asking.
+    ///
+    /// **The guarantee is "it plays unless you paused it", not "the recovery
+    /// path remembered to resume".** Several things can leave the rate at zero —
+    /// an external route ending, a seek completing oddly, an item swap — and
+    /// making each one responsible for restarting playback means a new one
+    /// arrives every few weeks. One rule on the wall-clock tick covers them all.
+    ///
+    /// `rate` rather than `timeControlStatus`: rate is the *requested* rate, so
+    /// it stays 1 while the player is merely waiting for data. Zero means
+    /// something actually stopped.
+    private func resumeIfStoppedUnexpectedly() {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+        guard !userPaused, !player.isExternalPlaybackActive, player.rate == 0 else { return }
+        Self.log.notice("playback stopped without being asked to, resuming")
+        player.play()
+    }
+
     // MARK: - Picture in Picture
 
-    #if os(iOS)
+    // Excluded on tvOS rather than limited to iOS: `AVPictureInPictureController`
+    // exists on macOS and behaves the same way, so the Mac gets PiP for free.
+    // tvOS is the platform without it — the TV *is* the screen, so there is no
+    // second window to float over.
+    #if !os(tvOS)
         // Not observed: nothing in a view body reads it, and @Observable would
         // otherwise generate tracking for a type views never touch.
         @ObservationIgnored private var pipController: AVPictureInPictureController?
@@ -318,6 +940,31 @@ final class AVPlayerEngine: PlaybackEngine {
             guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
             pipController = AVPictureInPictureController(playerLayer: layer)
         }
+
+        /// Starts PiP as soon as the system will allow it.
+        ///
+        /// **`isPictureInPicturePossible` is false until the layer has a
+        /// picture**, which on a rewrapped live stream is ~3s after the item
+        /// starts. Calling `startPictureInPicture()` before then is silently
+        /// ignored — no error, no window — so this waits for the flag rather
+        /// than firing once and hoping.
+        func startPictureInPicture() {
+            guard let pipController, !pipController.isPictureInPictureActive else { return }
+            pipStartTask?.cancel()
+            pipStartTask = Task { @MainActor [weak self] in
+                for _ in 0 ..< 60 {
+                    guard !Task.isCancelled, let self, let controller = self.pipController else { return }
+                    if controller.isPictureInPicturePossible {
+                        controller.startPictureInPicture()
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                Self.log.error("picture in picture never became possible")
+            }
+        }
+
+        @ObservationIgnored private var pipStartTask: Task<Void, Never>?
 
         func togglePictureInPicture() {
             guard let pipController else { return }

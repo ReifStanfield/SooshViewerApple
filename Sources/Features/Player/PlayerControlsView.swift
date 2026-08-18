@@ -12,7 +12,23 @@ import SwiftUI
     struct PlayerControlsView: View {
         @Bindable var model: PlayerModel
         let engine: AVPlayerEngine
+        var logoURL: URL? = nil
         let onBack: () -> Void
+
+        /// Hands this channel to the multiview grid and leaves the player.
+        var onMultiview: () -> Void = {}
+
+        #if targetEnvironment(macCatalyst)
+            /// Width of the timeline row, and of the LIVE badge that rides on it.
+            ///
+            /// Both are measured rather than assumed because the badge has to be
+            /// *centred on the playhead* and then kept inside the row — which
+            /// needs its own width, not an estimate of it. `onGeometryChange`
+            /// rather than a `GeometryReader` wrapper: a reader expands to fill
+            /// its parent and would fight the surrounding `VStack`.
+            @State private var timelineWidth: CGFloat = 0
+            @State private var liveBadgeWidth: CGFloat = 0
+        #endif
 
         var body: some View {
             // **One** container for the whole layer, not one per pill.
@@ -39,9 +55,26 @@ import SwiftUI
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                    topCluster
-                    centreButton
-                    bottomCluster
+                    // **The Mac layout is a fork, not a tuned variant.** A
+                    // phone in portrait cannot carry a two-column bottom row
+                    // with a programme synopsis in it, and a Mac window has no
+                    // thumb-reach constraint to design around. `#if
+                    // targetEnvironment(macCatalyst)` rather than a size class:
+                    // this is about which platform's conventions apply, and an
+                    // iPad at the same width still wants the touch layout.
+                    #if targetEnvironment(macCatalyst)
+                        catalystTopCluster
+                        // Only the connecting spinner stays in the centre. On
+                        // this layout play/pause lives next to the other
+                        // transport controls at the bottom right, so leaving a
+                        // second one mid-screen would be two of the same button.
+                        catalystCentreButton
+                        catalystBottomCluster
+                    #else
+                        topCluster
+                        centreButton
+                        bottomCluster
+                    #endif
                 }
             }
             .opacity(model.controlsVisible ? 1 : 0)
@@ -114,7 +147,7 @@ import SwiftUI
             ControlPill {
                 audioMenu {
                     HStack(spacing: 4) {
-                        Text(engine.audioLanguageLabel)
+                        Text(engine.streamInfo.resolutionLabel ?? "UNK")
                             .font(.title3.weight(.semibold))
                         Image(systemName: "chevron.down")
                             .font(.body.weight(.semibold))
@@ -178,19 +211,31 @@ import SwiftUI
                     .tint(.white)
 
             case .playing:
-                Button {
-                    engine.playOrPause()
-                    model.pokeControls()
-                } label: {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 34))
-                        .foregroundStyle(.white)
+                // Waiting for data is not the same as paused — see
+                // `catalystPlayPause`. Rebuffering mid-stream shows the spinner
+                // rather than inviting a tap that would stop it.
+                if engine.isBuffering {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.large)
+                        .tint(.white)
                         .frame(width: 72, height: 72)
-                        .contentShape(Circle())
+                        .accessibilityLabel("Loading")
+                } else {
+                    Button {
+                        engine.playOrPause()
+                        model.pokeControls()
+                    } label: {
+                        Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.white)
+                            .frame(width: 72, height: 72)
+                            .contentShape(Circle())
+                    }
+                    // Cross-fades the glyph instead of popping it.
+                    .contentTransition(.symbolEffect(.replace))
+                    .glassEffect(.regular.interactive(), in: Circle())
                 }
-                // Cross-fades the glyph instead of popping it.
-                .contentTransition(.symbolEffect(.replace))
-                .glassEffect(.regular.interactive(), in: Circle())
 
             case .failed:
                 EmptyView()  // the failure overlay in PlayerView owns this state
@@ -219,7 +264,7 @@ import SwiftUI
                             model.pokeControls()
                         }
                         PillButton(systemImage: "plus.rectangle.on.rectangle") {
-                            model.pokeControls()  // TODO: multiview
+                            onMultiview()
                         }
                         PillButton(systemImage: "arrow.up.left.and.arrow.down.right") {
                             toggleFullScreen()
@@ -256,6 +301,295 @@ import SwiftUI
                     .frame(width: 44, height: 44)
             }
         }
+
+
+        // MARK: - Mac Catalyst layout
+
+        #if targetEnvironment(macCatalyst)
+
+            /// Back on the left, everything else in **one** right-hand row.
+            ///
+            /// The touch layout stacks two pills here because a phone cannot fit
+            /// five targets across next to a back button. A Mac window can, and a
+            /// single row is what the platform expects.
+            private var catalystTopCluster: some View {
+                VStack {
+                    HStack(alignment: .center) {
+                        CircleButton(systemImage: "arrow.left", action: onBack)
+                        Spacer()
+                        ControlPill {
+                            audioMenu {
+                                HStack(spacing: 4) {
+                                    Text(engine.streamInfo.resolutionLabel ?? "UNK")
+                                        .font(.title3.weight(.semibold))
+                                    Image(systemName: "chevron.down")
+                                        .font(.body.weight(.semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .frame(height: 44)
+                            }
+                            audioMenu {
+                                Image(systemName: "speaker.wave.2")
+                                    .font(.title3)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                            }
+                            airPlayControl
+                            PillButton(systemImage: "tv.badge.wifi") {
+                                model.pokeControls()  // TODO: channel guide
+                            }
+                            PillButton(systemImage: "ellipsis") {
+                                model.pokeControls()  // TODO: overflow menu
+                            }
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+            }
+
+            /// Connecting state only — see the note at the call site.
+            @ViewBuilder
+            private var catalystCentreButton: some View {
+                if case .playing = model.state {
+                    EmptyView()
+                } else if case .failed = model.state {
+                    EmptyView()
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.large)
+                        .tint(.white)
+                }
+            }
+
+            /// Programme identity on the left, transport on the right, timeline
+            /// underneath both.
+            private var catalystBottomCluster: some View {
+                VStack(spacing: 14) {
+                    Spacer()
+                    HStack(alignment: .bottom, spacing: 20) {
+                        catalystProgramInfo
+                        Spacer(minLength: 20)
+                        HStack(spacing: 12) {
+                            catalystPlayPause
+                            ControlPill {
+                                PillButton(systemImage: "heart") {
+                                    model.pokeControls()  // TODO: favourites
+                                }
+                                PillButton(systemImage: "plus.rectangle.on.rectangle") {
+                                    onMultiview()
+                                }
+                                subtitleMenu
+                                audioMenu {
+                                    Image(systemName: "waveform")
+                                        .font(.title3)
+                                        .foregroundStyle(.white)
+                                        .frame(width: 44, height: 44)
+                                }
+                            }
+                        }
+                        // The transport must not move when a programme title
+                        // wraps to two lines, so it never yields width.
+                        .layoutPriority(1)
+                    }
+                    catalystTimeline
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 14)
+            }
+
+            /// Play, pause, or *waiting* — three states, because the player has
+            /// three.
+            ///
+            /// Showing the play glyph while the player is waiting for data reads
+            /// as "stopped, press to resume", and pressing it then pauses the
+            /// stream that was about to start. This is what made returning from
+            /// AirPlay unreadable: a black picture and a play button, with no way
+            /// to tell loading from stopped.
+            @ViewBuilder
+            private var catalystPlayPause: some View {
+                if case .playing = model.state {
+                    if engine.isBuffering {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .frame(width: 56, height: 56)
+                            .glassEffect(.regular, in: Circle())
+                            .accessibilityLabel("Loading")
+                    } else {
+                        Button {
+                            engine.playOrPause()
+                            model.pokeControls()
+                        } label: {
+                            Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 26))
+                                .foregroundStyle(.white)
+                                .frame(width: 56, height: 56)
+                                .contentShape(Circle())
+                        }
+                        .contentTransition(.symbolEffect(.replace))
+                        .glassEffect(.regular.interactive(), in: Circle())
+                    }
+                }
+            }
+
+            /// Channel, programme, synopsis and what the stream actually is.
+            ///
+            /// **The badges report only what the pipeline measured.** Resolution,
+            /// frame rate and channel count come from `streamInfo` and are absent
+            /// until the stream declares them, rather than being filled in with
+            /// plausible defaults.
+            private var catalystProgramInfo: some View {
+                HStack(alignment: .bottom, spacing: 12) {
+                    if let logoURL {
+                        AsyncImage(url: logoURL) { image in
+                            image.resizable().scaledToFit()
+                        } placeholder: {
+                            Color.clear
+                        }
+                        .frame(width: 56, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.channelName)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+
+                        if let program = model.currentProgram {
+                            Text(program.displayTitle)
+                                .font(.title.weight(.bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+
+                            if let synopsis = program.programDescription, !synopsis.isEmpty {
+                                Text(synopsis)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .lineLimit(2)
+                                    .frame(maxWidth: 520, alignment: .leading)
+                            }
+                        }
+
+                        HStack(spacing: 6) {
+                            ForEach(catalystBadges, id: \.self) { badge in
+                                Text(badge)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .shadow(radius: 6)
+            }
+
+            private var catalystBadges: [String] {
+                var badges = ["DISPATCHARR"]
+                let info = engine.streamInfo
+                if let resolution = info.resolutionLabel { badges.append(resolution) }
+                if let rate = info.frameRateLabel { badges.append(rate.uppercased()) }
+                if let audio = info.audioLabel { badges.append(audio.uppercased()) }
+                return badges
+            }
+
+            /// The same read-only programme timeline, with the LIVE marker moved
+            /// onto the playhead.
+            ///
+            /// **The badge is positioned, not spaced.** It used to sit between two
+            /// `Spacer()`s, which pins it to the centre of the row and makes it
+            /// read as a label for the programme rather than for the moment
+            /// playback is at. Riding the thumb is the whole point of the change,
+            /// so its x is computed from `model.progress` and then clamped by its
+            /// own measured width so it cannot hang off either end.
+            @ViewBuilder
+            private var catalystTimeline: some View {
+                if let program = model.currentProgram {
+                    VStack(spacing: 6) {
+                        Slider(value: .constant(model.progress), in: 0...1)
+                            .tint(.white)
+                            .allowsHitTesting(false)
+                            .accessibilityRepresentation {
+                                ProgressView(value: model.progress)
+                                    .accessibilityLabel("Programme progress")
+                            }
+
+                        ZStack(alignment: .leading) {
+                            HStack(spacing: 12) {
+                                Text(program.startTime, style: .time)
+                                Spacer(minLength: 40)
+                                if let next = model.nextProgram {
+                                    Text("\(next.startTime.formatted(date: .omitted, time: .shortened)) - \(next.displayTitle)")
+                                        .lineLimit(1)
+                                        .foregroundStyle(.white.opacity(0.75))
+                                } else {
+                                    Text(program.endTime, style: .time)
+                                }
+                            }
+
+                            // **Not gated on `program.isLive`.** That flag is the
+                            // EPG's "this is a live event" marker — true for a
+                            // ball game, false for a repeat — and it is the wrong
+                            // question here. This badge marks where the playhead
+                            // is on a channel that is live by construction:
+                            // `currentProgram` is the programme airing *now*. The
+                            // gate meant the marker vanished on most programmes,
+                            // which is exactly when a viewer wants to know how
+                            // far behind the edge they are.
+                            liveBadge(for: program)
+                                .onGeometryChange(for: CGFloat.self) { proxy in
+                                    proxy.size.width
+                                } action: { width in
+                                    liveBadgeWidth = width
+                                }
+                                .offset(x: liveBadgeOffset)
+                        }
+                        .font(.callout.weight(.medium).monospacedDigit())
+                        .foregroundStyle(.white)
+                    }
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.width
+                    } action: { width in
+                        timelineWidth = width
+                    }
+                }
+            }
+
+            private func liveBadge(for program: Program) -> some View {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color(red: 0.886, green: 0.294, blue: 0.290))
+                        .frame(width: 10, height: 10)
+                    Text("LIVE")
+                        .foregroundStyle(Color(red: 0.886, green: 0.294, blue: 0.290))
+                    Text(Date.now, style: .time)
+                        .foregroundStyle(.white)
+                }
+            }
+
+            /// Where the badge sits, in points from the row's leading edge.
+            ///
+            /// `thumbInset` is half a `Slider` thumb: the thumb's centre travels
+            /// between `inset` and `width - inset`, not between 0 and `width`, so
+            /// interpolating across the full width drifts further out of line the
+            /// closer playback gets to either end.
+            private var liveBadgeOffset: CGFloat {
+                let thumbInset: CGFloat = 11
+                guard timelineWidth > liveBadgeWidth, liveBadgeWidth > 0 else { return 0 }
+
+                let travel = timelineWidth - thumbInset * 2
+                let head = thumbInset + travel * model.progress
+                let ideal = head - liveBadgeWidth / 2
+                return min(max(0, ideal), timelineWidth - liveBadgeWidth)
+            }
+
+        #endif
 
         // MARK: - Timeline
 

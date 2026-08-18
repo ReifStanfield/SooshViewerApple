@@ -11,10 +11,10 @@ struct CategoryCard: View {
     let category: Category
     let subtitle: String
 
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @RegularWidth private var isRegularWidth
 
     private var metrics: Metrics {
-        .resolve(isRegularWidth: horizontalSizeClass == .regular)
+        .resolve(isRegularWidth: isRegularWidth)
     }
 
     private var background: RGBColor { neutralCardColor(seed: category.name) }
@@ -22,7 +22,7 @@ struct CategoryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(category.name)
-                .font(Layout.isTV ? .title3.weight(.semibold) : .headline)
+                .font(Layout.isTV ? .title3.weight(.semibold) : .subheadline.bold())
                 .foregroundStyle(background.foreground)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)

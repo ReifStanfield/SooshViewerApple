@@ -126,10 +126,12 @@ extension View {
     /// difference is a fact about the modifier, not about any of the screens
     /// that want an inline title.
     func inlineNavigationTitle() -> some View {
-        #if os(tvOS)
-            self
-        #else
+        #if os(iOS)
             self.navigationBarTitleDisplayMode(.inline)
+        #else
+            // tvOS and macOS both have no navigation *bar* to set a display mode
+            // on — the modifier is unavailable, not merely inert.
+            self
         #endif
     }
 }

@@ -64,8 +64,7 @@ struct GeneralSettingsView: View {
 
             Section("User Agent") {
                 TextField("Enter user agent", text: $settings.userAgent)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
+                    .plainTextEntry()
             }
 
             Section("Xtream Codes") {

@@ -85,6 +85,20 @@ targets:
       path: Generated/Info-iOS.plist
       properties:
         CFBundleDisplayName: Soosh
+        # The live path now serves HLS from 127.0.0.1 over plain HTTP, and App
+        # Transport Security blocks cleartext by default. `NSAllowsLocalNetworking`
+        # is the documented exemption for loopback and local-network loads; it
+        # relaxes nothing about the Dispatcharr connection itself, which stays
+        # HTTPS and stays subject to ATS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Required because the rewrap's HLS server accepts connections from the
+        # local network, which is what lets an AirPlay receiver fetch the
+        # playlist. Without a stated purpose the OS can refuse the access with
+        # no error the app can see.
+        NSLocalNetworkUsageDescription: >-
+          Soosh streams live TV to AirPlay devices on your network by serving
+          the video from this device.
         UILaunchScreen: {}
         # Required for Picture in Picture and for audio to survive
         # backgrounding. Without it PiP starts and immediately stops.
@@ -100,22 +114,46 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.soosh.viewer
-        # Mac Catalyst, so the app has a real Mac window.
+        # **Mac Catalyst is on, and the way it got here was deleting a
+        # dependency rather than fixing one.**
         #
-        # Without this the only macOS destination is "Designed for iPad", which
-        # runs the iOS binary in a fixed-size window that cannot be resized and
+        # It is what gives the app a real resizable Mac window; without it the
+        # only macOS destination is "Designed for iPad", a fixed-size window that
         # ignores `.defaultSize` outright — which is why setting it in
         # `SooshViewerApp` appeared to do nothing.
+        #
+        # Catalyst was blocked three times, once per FFmpeg engine, and **not one
+        # of the three was blocked by our code.** All three were binary
+        # packaging:
+        #
+        # - KSPlayer 2.3.4 declared `.macCatalyst(.v13)` while its own FFmpegKit
+        #   required `.v14`, so the pair would not build for Catalyst at all.
+        # - MPVKit 1.0.0 shipped a real `ios-arm64_x86_64-maccatalyst` slice and
+        #   *compiled and linked*, then failed at the embed step on all ~25
+        #   binary frameworks: iOS-style shallow bundles where Catalyst wants the
+        #   macOS versioned layout.
+        # - AetherEngine 6.27.1 shipped no Catalyst slice at all, and so failed
+        #   earliest of the three — at slice selection, before compiling.
+        #
+        # The engines were there to demux MPEG-TS. They did not need to be:
+        # AVFoundation decodes MPEG-TS natively **as HLS segments** — it is HLS's
+        # original container — and these channels are ordinary H.264 High +
+        # AAC-LC. What it cannot consume is an endless, unindexed TS body, which
+        # is a framing problem, not a codec one. `Sources/Playback/TransportStream`
+        # solves the framing in ~600 lines of Foundation and Network, so there is
+        # no xcframework left to have a Catalyst slice or not have one.
+        #
+        # That also retired the tvOS-simulator `EXCLUDED_ARCHS` workaround (a
+        # missing LibDovi x86_64 slice) and several GB of binaries.
         SUPPORTS_MACCATALYST: YES
         # Catalyst gets its own bundle id derived from the iOS one, rather than
         # sharing it.
         DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: YES
         # Deployment target for the Catalyst variant. Matched to iOS 26 for the
         # same reason: Liquid Glass unconditionally.
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
 
-  # Tests run on iOS only. The connect loop under test is platform-independent,
-  # and a second test target would just double the run time.
   SooshTests:
     type: bundle.unit-test
     platform: iOS
@@ -138,6 +176,20 @@ targets:
       path: Generated/Info-tvOS.plist
       properties:
         CFBundleDisplayName: Soosh
+        # The live path now serves HLS from 127.0.0.1 over plain HTTP, and App
+        # Transport Security blocks cleartext by default. `NSAllowsLocalNetworking`
+        # is the documented exemption for loopback and local-network loads; it
+        # relaxes nothing about the Dispatcharr connection itself, which stays
+        # HTTPS and stays subject to ATS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Required because the rewrap's HLS server accepts connections from the
+        # local network, which is what lets an AirPlay receiver fetch the
+        # playlist. Without a stated purpose the OS can refuse the access with
+        # no error the app can see.
+        NSLocalNetworkUsageDescription: >-
+          Soosh streams live TV to AirPlay devices on your network by serving
+          the video from this device.
         DISPATCHARR_URL: $(DISPATCHARR_URL)
         DISPATCHARR_USER: $(DISPATCHARR_USER)
         DISPATCHARR_PASS: $(DISPATCHARR_PASS)

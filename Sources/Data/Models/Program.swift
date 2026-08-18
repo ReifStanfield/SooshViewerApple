@@ -24,6 +24,15 @@ struct Program: Identifiable, Hashable, Sendable {
     let isPremiere: Bool
     let isFinale: Bool
 
+    /// A stand-in the EPG never sent, standing for a channel it says nothing
+    /// about.
+    ///
+    /// A stored flag rather than a sentinel id. The obvious trick — a negative
+    /// id — would make every `id` comparison in the app quietly load-bearing,
+    /// and nothing at the point of use would say so. It defaults to false, so
+    /// the memberwise initialiser and the decoder both carry on unchanged.
+    var isPlaceholder: Bool = false
+
     /// Ornament-free title, for display. Lives on the model so the guide, the
     /// carousel and the player overlay cannot drift apart.
     var displayTitle: String { title.strippedOfNonASCII }
@@ -45,6 +54,35 @@ struct Program: Identifiable, Hashable, Sendable {
     func progress(at moment: Date = .now) -> Double {
         guard duration > 0 else { return 0 }
         return min(max(moment.timeIntervalSince(startTime) / duration, 0), 1)
+    }
+
+    /// A filler entry spanning `start`…`end` for a channel with no EPG.
+    ///
+    /// Synthesised rather than special-cased in the guide, so a channel the EPG
+    /// has never heard of still has a row you can see, tap, and open details
+    /// for. Everything downstream — the block, the detail sheet, the tap
+    /// handler — takes a `Program` and does not need to know this one is made
+    /// up; only the colour does.
+    static func placeholder(for channel: Channel, from start: Date, to end: Date) -> Program {
+        Program(
+            // Real ids come from the EPG and are only ever compared within a
+            // channel's own schedule, which this is the entirety of.
+            id: 0,
+            title: "No guide data",
+            startTime: start,
+            endTime: end,
+            subTitle: nil,
+            programDescription: nil,
+            tvgID: channel.effectiveTvgID,
+            iconURL: nil,
+            season: nil,
+            episode: nil,
+            isNew: false,
+            isLive: false,
+            isPremiere: false,
+            isFinale: false,
+            isPlaceholder: true
+        )
     }
 }
 

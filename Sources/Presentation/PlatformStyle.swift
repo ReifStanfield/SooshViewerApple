@@ -32,7 +32,8 @@ extension View {
 // MARK: - Focusable button styles
 
 extension View {
-    /// Button style for a **card**: `.plain` on iOS, a plain lift on tvOS.
+    /// Button style for a **card**: a hover lift wherever there is a pointer,
+    /// a focus lift on tvOS.
     func cardButtonStyle() -> some View {
         #if os(tvOS)
             buttonStyle(LiftButtonStyle())
@@ -65,7 +66,41 @@ extension View {
     }
 }
 
-#if os(iOS)
+extension View {
+    /// Stops a text field auto-capitalising, where that is a thing that happens.
+    ///
+    /// Wrapped rather than `#if`-ed at each call site, for the same reason as
+    /// `inlineNavigationTitle`: the platform difference is a fact about the
+    /// modifier, not about the fields that want plain text.
+    /// The `#if os(macOS)` arm here was for the native Mac target, which had no
+    /// software keyboard to autocapitalise. Catalyst compiles as iOS and takes
+    /// the modifier without complaint.
+    func plainTextEntry() -> some View {
+        autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+    }
+}
+
+extension ToolbarItemPlacement {
+    /// The trailing end of the navigation chrome, wherever that is.
+    ///
+    /// `.topBarTrailing` names a *top bar*, which is a UIKit idea and is
+    /// unavailable on macOS. AppKit's toolbar has no fixed leading/trailing
+    /// halves to ask for, so `.automatic` is the honest answer there and puts
+    /// the item in the toolbar's natural position.
+    static var trailingAccessory: ToolbarItemPlacement {
+        #if os(iOS)
+            .topBarTrailing
+        #else
+            .automatic
+        #endif
+    }
+}
+
+// Every pointer platform, which now means Mac as well as iPad. Excluded on tvOS
+// rather than limited to iOS: a remote has focus, not a cursor, and `LiftButtonStyle`
+// is that platform's answer.
+#if !os(tvOS)
 
     /// Pointer treatment for a card: a grey plate behind it, and a lift.
     struct HoverCardButtonStyle: ButtonStyle {
@@ -82,10 +117,10 @@ extension View {
             /// `ButtonStyle` is not a `View`, so state declared on it is never
             /// installed and never updates
             @State private var isHovered = false
-            @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+            @RegularWidth private var isRegularWidth
 
             private var metrics: Metrics {
-                .resolve(isRegularWidth: horizontalSizeClass == .regular)
+                .resolve(isRegularWidth: isRegularWidth)
             }
 
             var body: some View {

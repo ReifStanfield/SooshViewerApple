@@ -176,7 +176,13 @@ import SwiftUI
                 HStack(spacing: 18) {
                     qualityPill
                     circle(.favourite, "heart") { /* TODO: favourites */  }
-                    circle(.multiview, "plus.rectangle.on.rectangle") { /* TODO: multiview */  }
+                    circle(.multiview, "plus.rectangle.on.rectangle") {
+                        // **Deliberately still a stub on tvOS.** The tile
+                        // overlay is driven by taps and has no focus model, so
+                        // on a remote the tiles would be unreachable — you could
+                        // create them and then not select or close one. Wiring
+                        // this up means giving the grid focus behaviour first.
+                    }
                     circle(.pictureInPicture, "pip") { /* TODO: PiP on tvOS */  }
                     subtitlesMenu
                     audioMenu

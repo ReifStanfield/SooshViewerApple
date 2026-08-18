@@ -2,10 +2,22 @@ import AVFoundation
 import AVKit
 import SwiftUI
 
+// The video surface, with no controls of its own. `AVPlayerViewController` /
+// `AVPlayerView` are the right choice when you want the *system* controls — they
+// are emphatically the wrong one when you are drawing your own, because with
+// `showsPlaybackControls = false` the controller becomes an opaque box that
+// still owns gestures and still insets your layout.
+//
+// A bare `AVPlayerLayer` also hands us the object `AVPictureInPictureController`
+// needs, which `AVPlayerViewController` never exposes.
+//
+// There was an AppKit fork here for the native Mac target. That target is gone
+// in favour of Mac Catalyst, which compiles as iOS and so takes this path.
+
 /// A `UIView` whose backing layer *is* an `AVPlayerLayer`.
 ///
-/// Overriding `layerClass` rather than adding a sublayer is the standard trick:
-/// the layer then resizes with the view automatically, so there is no
+/// Overriding `layerClass` rather than adding a sublayer is the standard
+/// trick: the layer then resizes with the view automatically, so there is no
 /// `layoutSubviews` bookkeeping and no frame drift during rotation.
 final class PlayerLayerUIView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -13,16 +25,6 @@ final class PlayerLayerUIView: UIView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
-/// The video surface, with no controls of its own.
-///
-/// Used on **both** platforms now that tvOS draws its own controls too.
-/// `AVPlayerViewController` is the right choice when you want the system
-/// controls — it is emphatically the wrong one when you are drawing your own,
-/// because with `showsPlaybackControls = false` it becomes an opaque box that
-/// still owns gestures and still insets your layout.
-///
-/// A bare `AVPlayerLayer` also hands us the object `AVPictureInPictureController`
-/// needs, which `AVPlayerViewController` never exposes.
 struct VideoLayerView: UIViewRepresentable {
     let player: AVPlayer
 
@@ -44,6 +46,14 @@ struct VideoLayerView: UIViewRepresentable {
         }
     }
 }
+
+
+
+// The live path needs no representable of its own, and no longer needs a second
+// path at all: live TS is rewrapped as HLS and presented by the same
+// `AVPlayerLayer` above. The hand-rolled `CAMetalLayer` host that used to live
+// here belonged to libmpv, which rendered itself — nothing renders that way any
+// more, and nothing here is engine-specific.
 
 #if os(iOS)
 

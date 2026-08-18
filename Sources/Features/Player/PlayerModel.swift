@@ -94,12 +94,21 @@ final class PlayerModel {
         channelName: String,
         streamURL: URL?,
         programs: [Program],
-        engine: any PlaybackEngine = AVPlayerEngine()
+        engine: (any PlaybackEngine)? = nil
     ) {
         self.channelName = channelName
         self.streamURL = streamURL
         self.programs = programs
-        self.engine = engine
+        // **One engine now, for every URL.** This used to fork: raw MPEG-TS to
+        // an FFmpeg engine, everything else to AVFoundation. The fork existed
+        // because AVFoundation cannot consume an endless TS body — not because
+        // it cannot decode MPEG-TS, which it does natively inside HLS.
+        // `AVPlayerEngine` wraps the TS in a live playlist itself now, so there
+        // is one path, and AirPlay, PiP and Now Playing are on all of it.
+        //
+        // Still defaulted here rather than in the parameter list, so tests can
+        // inject a fake without production naming an engine at every call site.
+        self.engine = engine ?? AVPlayerEngine()
     }
 
     // MARK: - Tunables, all load-bearing
@@ -110,17 +119,31 @@ final class PlayerModel {
     static let maxAttempts = 3
 
     /// Give up only after this long with no measurable progress at all.
-    static let stallTimeout: Duration = .seconds(12)
+    ///
+    /// **This is a stall timeout, so it does not cap a slow stream** — any
+    /// movement in buffer, position or track count resets it. It only bounds
+    /// how long we sit on a pipeline that is doing nothing at all, which is
+    /// what a refused or dead upstream looks like. 12s was three times longer
+    /// than that case ever needs, and it was paid on every attempt.
+    static let stallTimeout: Duration = .seconds(6)
 
     /// Absolute ceiling, so a stream that trickles forever still fails.
-    static let overallTimeout: Duration = .seconds(60)
+    static let overallTimeout: Duration = .seconds(30)
 
     /// How often the connect loop samples the pipeline.
     static let pollInterval: Duration = .milliseconds(250)
 
-    /// Backoff before attempt *n+1*: 5s then 10s. Long enough for the server to
-    /// actually drop the old session; a tight loop just races itself.
-    static func backoff(afterAttempt attempt: Int) -> Duration { .seconds(5 * attempt) }
+    /// Backoff before attempt *n+1*: 3s then 6s.
+    ///
+    /// Still a real pause, for the reason the longer one existed: `engine.stop()`
+    /// asks for the socket back but the proxy may not have dropped the upstream
+    /// session yet, and a retry that arrives first is refused by the provider —
+    /// which is the very failure being retried.
+    ///
+    /// The old 5s/10s put the worst case at roughly 12+5+12+10+12 ≈ 51s before
+    /// the user was told anything. With these it is about 24s, and a genuinely
+    /// busy provider still gets 9s of quiet.
+    static func backoff(afterAttempt attempt: Int) -> Duration { .seconds(3 * attempt) }
 
     // MARK: - Connect
 
