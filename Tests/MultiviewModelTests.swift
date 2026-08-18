@@ -127,4 +127,96 @@ struct MultiviewModelTests {
         #expect(!model.isActive)
         #expect(model.audibleTileID == nil)
     }
+
+    // MARK: - Presentation
+
+    @Test("one stream floats in the corner, two take the screen")
+    func presentationFollowsCount() {
+        let model = MultiviewModel()
+        add(model, channel(id: 1, name: "One"))
+        // One stream is something you keep an eye on while using the app.
+        #expect(model.presentation == .corner)
+
+        add(model, channel(id: 2, name: "Two"))
+        // Two is the thing you are doing.
+        #expect(model.presentation == .expanded)
+    }
+
+    @Test("browsing steps aside without dropping a stream")
+    func browsingStepsAside() {
+        let model = MultiviewModel()
+        add(model, channel(id: 1, name: "One"))
+        add(model, channel(id: 2, name: "Two"))
+
+        model.beginBrowsing()
+        #expect(model.presentation == .browse)
+        // The point of browsing rather than closing: the streams keep playing.
+        #expect(model.tiles.count == 2)
+
+        add(model, channel(id: 3, name: "Three"))
+        // Picking a channel is the end of picking a channel.
+        #expect(model.presentation == .expanded)
+        #expect(model.tiles.count == 3)
+    }
+
+    @Test("focus mode promotes the tile being listened to")
+    func focusPromotesAudible() {
+        let model = MultiviewModel()
+        let first = add(model, channel(id: 1, name: "One"))
+        add(model, channel(id: 2, name: "Two"))
+        model.makeAudible(first!.id)
+
+        model.toggleLayout()
+
+        #expect(model.layout == .focus)
+        // Promoting whichever tile happens to be first is rarely the one being
+        // watched, so the audible tile takes the large slot.
+        #expect(model.focusedTile?.id == first?.id)
+        #expect(model.secondaryTiles.count == 1)
+    }
+
+    @Test("removing the focused tile hands the large slot to another")
+    func removingFocusedReassigns() {
+        let model = MultiviewModel()
+        let first = add(model, channel(id: 1, name: "One"))
+        let second = add(model, channel(id: 2, name: "Two"))
+        model.focus(second!.id)
+
+        model.remove(second!.id)
+
+        // A large slot pointing at a tile that no longer exists renders nothing.
+        #expect(model.focusedTile?.id == first?.id)
+    }
+
+    @Test("closing everything resets the layout too")
+    func closeAllResetsLayout() {
+        let model = MultiviewModel()
+        add(model, channel(id: 1, name: "One"))
+        add(model, channel(id: 2, name: "Two"))
+        model.toggleLayout()
+        model.beginBrowsing()
+
+        model.closeAll()
+
+        // Otherwise the next multiview opens in whatever mode the last one was
+        // left in, which reads as the app remembering the wrong thing.
+        #expect(model.layout == .grid)
+        #expect(model.presentation == .corner)
+        #expect(model.focusedTile == nil)
+    }
+
+    @Test("browsing can be abandoned without losing the streams")
+    func browsingIsNotATrap() {
+        let model = MultiviewModel()
+        add(model, channel(id: 1, name: "One"))
+        add(model, channel(id: 2, name: "Two"))
+
+        model.beginBrowsing()
+        model.endBrowsing()
+
+        // Hiding the grid with no way back would strand several playing streams
+        // with nothing on screen to reach them.
+        #expect(model.presentation == .expanded)
+        #expect(model.tiles.count == 2)
+    }
 }

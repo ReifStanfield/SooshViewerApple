@@ -26,7 +26,78 @@ final class MultiviewModel {
         let model: PlayerModel
     }
 
+    /// How the tiles are arranged when the grid has the screen.
+    enum Layout: Equatable {
+        /// Equal cells: two side by side, four as a 2x2.
+        case grid
+        /// One stream at full size with the others small along its bottom edge.
+        case focus
+    }
+
+    /// Whether the grid is a corner window or has taken the screen.
+    ///
+    /// **Driven by count, with one deliberate exception.** One stream is a thing
+    /// you keep an eye on while using the app, so it floats in the corner. Two
+    /// or more is the thing you are doing, so it takes the screen. The exception
+    /// is `browse`, which steps out of the way *without* dropping to one tile so
+    /// you can pick the next channel.
+    enum Presentation: Equatable {
+        case corner
+        case expanded
+        case browse
+    }
+
     private(set) var tiles: [Tile] = []
+
+    private(set) var layout: Layout = .grid
+
+    /// The tile in the large slot under `.focus`. Nil means the first one.
+    private(set) var focusedTileID: Tile.ID?
+
+    /// Set while the viewer is picking another channel, so the grid gets out of
+    /// the way without being torn down.
+    private var isBrowsing = false
+
+    var presentation: Presentation {
+        if isBrowsing { return .browse }
+        return tiles.count >= 2 ? .expanded : .corner
+    }
+
+    /// The tile shown large under `.focus`.
+    var focusedTile: Tile? {
+        tiles.first { $0.id == focusedTileID } ?? tiles.first
+    }
+
+    var secondaryTiles: [Tile] {
+        tiles.filter { $0.id != focusedTile?.id }
+    }
+
+    // MARK: - Presentation
+
+    func toggleLayout() {
+        layout = layout == .grid ? .focus : .grid
+        // Entering focus without a chosen tile would otherwise promote whichever
+        // happens to be first, which is rarely the one being watched.
+        if layout == .focus, focusedTileID == nil {
+            focusedTileID = audibleTileID ?? tiles.first?.id
+        }
+    }
+
+    func focus(_ id: Tile.ID) {
+        focusedTileID = id
+        makeAudible(id)
+    }
+
+    /// Steps aside so another channel can be picked.
+    func beginBrowsing() { isBrowsing = true }
+
+    /// Comes back without having picked anything.
+    ///
+    /// **Without this, browsing is a trap.** The grid hides itself so you can
+    /// see the app, and if you then change your mind there is nothing on screen
+    /// to bring it back — several streams still playing and no way to reach
+    /// them. The pill in the corner during `.browse` calls this.
+    func endBrowsing() { isBrowsing = false }
 
     /// The tile you can hear. Everything else is muted.
     ///
@@ -97,6 +168,8 @@ final class MultiviewModel {
 
         // The newest tile takes the sound: you just asked for it.
         makeAudible(tile.id)
+        // Picking a channel is the end of picking a channel.
+        isBrowsing = false
         return tile
     }
 
@@ -119,6 +192,7 @@ final class MultiviewModel {
         let tile = Tile(channel: channel, logoURL: logoURL, model: model)
         tiles.append(tile)
         makeAudible(tile.id)
+        isBrowsing = false
         return tile
     }
 
@@ -135,6 +209,9 @@ final class MultiviewModel {
             audibleTileID = tiles.last?.id
             applyMuting()
         }
+        if focusedTileID == id {
+            focusedTileID = tiles.first?.id
+        }
     }
 
     func closeAll() {
@@ -143,6 +220,9 @@ final class MultiviewModel {
         }
         tiles.removeAll()
         audibleTileID = nil
+        focusedTileID = nil
+        isBrowsing = false
+        layout = .grid
     }
 
     // MARK: - Audio

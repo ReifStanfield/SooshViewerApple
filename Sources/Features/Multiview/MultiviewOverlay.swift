@@ -10,53 +10,167 @@ import SwiftUI
 struct MultiviewOverlay: View {
     @Bindable var multiview: MultiviewModel
 
-    /// Tile width. Two columns of these plus the gaps is the corner cluster's
-    /// full width, which is what bounds how far it intrudes on the app.
-    private let tileWidth: CGFloat = 240
+    /// Corner-window width. Two of these plus the gaps bound how far the
+    /// single-stream case intrudes on the app.
+    private let cornerTileWidth: CGFloat = 240
 
     var body: some View {
+        switch multiview.presentation {
+        case .corner:
+            cornerWindows
+        case .expanded:
+            expandedGrid
+        case .browse:
+            // Out of the way while a channel is being picked — but not gone
+            // without trace. The streams are still playing, so there has to be
+            // something on screen that says so and leads back to them.
+            browsingPill
+        }
+    }
+
+    /// The only thing on screen while browsing: what is still playing, and the
+    /// way back to it.
+    private var browsingPill: some View {
+        Button {
+            multiview.endBrowsing()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.grid.2x2")
+                Text("^[\(multiview.tiles.count) stream](inflect: true) playing")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .accessibilityLabel("Back to multiview")
+    }
+
+    // MARK: - One stream: a window in the corner
+
+    @ViewBuilder
+    private var cornerWindows: some View {
         if multiview.isActive {
             VStack(alignment: .trailing, spacing: 10) {
                 Spacer()
-                // **Wrapped in an HStack with a leading Spacer.** A `LazyVGrid`
-                // expands to whatever width it is offered and centres its
-                // columns inside it, so on its own the tiles sat in the middle
-                // of the screen however the stack was aligned. The Spacer is
-                // what actually pushes them into the corner.
-                //
-                // Two columns, filling top-to-bottom: a single row would run off
-                // a phone, and a free-floating grid would need drag state the
-                // feature does not have yet.
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    LazyVGrid(
-                        columns: Array(
-                            repeating: GridItem(.fixed(tileWidth), spacing: 10),
-                            count: multiview.tiles.count > 1 ? 2 : 1
-                        ),
-                        spacing: 10
-                    ) {
-                        ForEach(multiview.tiles) { tile in
-                            MultiviewTileView(
-                                tile: tile,
-                                isAudible: tile.id == multiview.audibleTileID,
-                                onFocus: { multiview.makeAudible(tile.id) },
-                                onClose: { multiview.remove(tile.id) }
-                            )
-                            .frame(width: tileWidth, height: tileWidth * 9 / 16)
-                        }
+                    ForEach(multiview.tiles) { tile in
+                        tileView(tile)
+                            .frame(width: cornerTileWidth, height: cornerTileWidth * 9 / 16)
                     }
-                    .fixedSize()
                 }
                 closeAllButton
             }
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            // The cluster must not swallow taps meant for the app behind it —
-            // only the tiles themselves are interactive.
-            .allowsHitTesting(true)
             .animation(.snappy(duration: 0.25), value: multiview.tiles.count)
         }
+    }
+
+    // MARK: - Two or more: the grid takes the screen
+
+    private var expandedGrid: some View {
+        ZStack {
+            // Opaque, not a scrim. At this point multiview *is* the screen, and
+            // a half-visible home page behind four moving pictures is noise.
+            Color.black.opacity(0.92).ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Group {
+                    switch multiview.layout {
+                    case .grid: equalGrid
+                    case .focus: focusLayout
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(16)
+
+                toolbar
+            }
+        }
+        .transition(.opacity)
+        .animation(.snappy(duration: 0.25), value: multiview.tiles.count)
+        .animation(.snappy(duration: 0.25), value: multiview.layout)
+    }
+
+    /// Equal cells: two side by side, three or four as a 2x2.
+    private var equalGrid: some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 2),
+            spacing: 12
+        ) {
+            ForEach(multiview.tiles) { tile in
+                tileView(tile).aspectRatio(16 / 9, contentMode: .fit)
+            }
+        }
+    }
+
+    /// One stream at full size, the rest small along its bottom edge.
+    ///
+    /// The small ones sit *over* the large picture rather than beside it, so the
+    /// stream you are actually watching keeps the whole frame.
+    private var focusLayout: some View {
+        ZStack(alignment: .bottom) {
+            if let focused = multiview.focusedTile {
+                tileView(focused)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            HStack(spacing: 10) {
+                ForEach(multiview.secondaryTiles) { tile in
+                    tileView(tile)
+                        .frame(width: 200, height: 200 * 9 / 16)
+                }
+            }
+            .padding(.bottom, 16)
+        }
+    }
+
+    // MARK: - Toolbar
+
+    /// Add, change layout, close — the three from the reference, in that order.
+    private var toolbar: some View {
+        HStack(spacing: 28) {
+            toolbarButton("plus.rectangle.on.rectangle", "Add a stream") {
+                // Steps the grid aside rather than closing it: the tiles keep
+                // playing while a channel is picked, and picking one brings the
+                // grid straight back.
+                multiview.beginBrowsing()
+            }
+            toolbarButton(
+                multiview.layout == .grid ? "square.grid.2x2" : "rectangle.inset.bottomthird.filled",
+                multiview.layout == .grid ? "Focus one stream" : "Show an even grid"
+            ) {
+                multiview.toggleLayout()
+            }
+            toolbarButton("xmark", "Close multiview") {
+                multiview.closeAll()
+            }
+        }
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func toolbarButton(
+        _ systemImage: String,
+        _ label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private var closeAllButton: some View {
@@ -71,6 +185,15 @@ struct MultiviewOverlay: View {
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: Capsule())
+    }
+
+    private func tileView(_ tile: MultiviewModel.Tile) -> some View {
+        MultiviewTileView(
+            tile: tile,
+            isAudible: tile.id == multiview.audibleTileID,
+            onFocus: { multiview.focus(tile.id) },
+            onClose: { multiview.remove(tile.id) }
+        )
     }
 }
 

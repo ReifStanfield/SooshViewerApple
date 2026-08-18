@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 71 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 77 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -52,7 +52,7 @@ Sources/Features/     One folder per screen: view + its @Observable model.
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                71 tests: connect loop, logo palette, HLS
+Tests/                77 tests: connect loop, logo palette, HLS
                       server, catalog cache, live-edge policy,
                       live-window timing, playable window, multiview.
 ```
@@ -135,6 +135,18 @@ opens a second upstream connection to the same stream and waits out another
 join — measured before the fix as two connections and two joins for one
 channel. `MultiviewModel.adopt` takes ownership, and `PlayerView.handedOff`
 stops `onDisappear` from tearing down the model the tile is now playing.
+
+**Presentation follows the count, with one exception.** One stream floats in
+the corner — something you keep an eye on while using the app. Two or more takes
+the screen as a grid, because at that point multiview *is* what you are doing.
+The exception is `browse`, which steps aside so the next channel can be picked
+without dropping to one tile; a pill in the corner says what is still playing
+and leads back, because hiding the grid with no way back strands several running
+streams.
+
+Two layouts: an even grid (two side by side, four as a 2x2), and focus — one
+stream at full size with the rest small along its bottom edge, over the picture
+rather than beside it so the one being watched keeps the frame.
 
 **`MultiviewModel` is owned by `RootView`, above the navigation stack**, and
 that placement is the design rather than a convenience. A tile has to keep
