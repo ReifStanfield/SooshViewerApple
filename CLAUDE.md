@@ -496,6 +496,13 @@ The TV build forks the *chrome*, not the data or the player logic.
 - Overscan is real: ~5% inset (`Layout.screenMarginH/V`).
 - A 1080p TV is 1920pt wide, so width-based size classes call it "expanded" —
   `guideRowCount` overrides that on TV.
+- **The backdrop is drawn once, by `TVSidebarShell`.** `AppBackground` is a
+  horizontal ramp across *its own frame*, so applying it again inside `HomeView`
+  gave the content a second ramp starting at the content's left edge — which is
+  inset past the rail. The two met at the rail's edge and the seam read as the
+  sidebar having a background of its own. `HomeView`'s copy is `#if !os(tvOS)`;
+  iOS still needs it, because there a `NavigationStack` paints the opaque system
+  background over anything applied outside it.
 - A nested style type named `Body` collides with `ButtonStyle`'s own `Body`
   associated type; name it something else.
 

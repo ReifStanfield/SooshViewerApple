@@ -151,7 +151,7 @@ struct MultiviewOverlay: View {
             HStack(spacing: 10) {
                 ForEach(multiview.secondaryTiles) { tile in
                     tileView(tile)
-                        .frame(width: 200, height: 200 * 9 / 16)
+                        .frame(width: 400, height: 400 * 9 / 16)
                 }
             }
             .padding(.bottom, 16)

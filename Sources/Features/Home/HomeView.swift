@@ -77,15 +77,25 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             content
-                // **Inside the stack, not on the shell around it.**
+                // **Inside the stack on iOS, and *only* on iOS.**
                 //
-                // `SidebarShell` also asks for the backdrop, and on tvOS that is
-                // where it lands — but on iOS a `NavigationStack` paints the
-                // opaque system background over anything behind it, so a
-                // backdrop applied outside is invisible. The same trap the
-                // project notes record for `TabView`. Applied to the stack's own
-                // content, it sits above that system fill.
-                .appBackground()
+                // On iOS a `NavigationStack` paints the opaque system background
+                // over anything behind it, so a backdrop applied outside it is
+                // invisible — the same trap the project notes record for
+                // `TabView`. Applied to the stack's own content, it sits above
+                // that system fill.
+                //
+                // **On tvOS `TVSidebarShell` already draws it, and drawing it
+                // again here is what made the rail look like it had a
+                // background of its own.** `AppBackground` is a horizontal ramp
+                // across *its own frame*: the shell's spans the whole screen,
+                // while this one spans only the content, which is inset past the
+                // rail. Two ramps with different origins meet at the rail's edge
+                // and the seam reads as a separate sidebar backdrop. One
+                // backdrop, full width, behind everything.
+                #if !os(tvOS)
+                    .appBackground()
+                #endif
                 #if !os(tvOS)
                     .safeAreaInset(edge: .top, spacing: 0) {
                         HomeHeader(
