@@ -222,6 +222,17 @@ no decoder.
   still loading — and pressing it would have stopped the playback that was about
   to start. `AVPlayerEngine.isBuffering` is the third state; the controls show a
   spinner for it.
+- **The watchdog runs on a wall clock, never on `addPeriodicTimeObserver`.**
+  That observer fires on *playback time* advancing, so it falls silent exactly
+  when playback stops — which is the only moment any of this matters. It
+  appeared to work while our own seeks were nudging the timebase and keeping it
+  alive; once the seek storm was rate-limited away, a stuck stream produced no
+  catch-up, no stall report and no recovery at all. A watchdog driven by the
+  thing it is watching is not a watchdog.
+- **The watchdog only applies after an item has been ready once.** Before that
+  the stream is merely starting, and `PlayerModel`'s connect loop owns that
+  phase with its own timeout and retries; a second recovery underneath it would
+  fight it and open extra upstream connections.
 - **A stall watchdog backs all of this up, and is deliberately blind to the
   cause.** "Wants to play, has nothing, position not moving, for ten seconds"
   rebuilds the stream. The route-end handler covers AirPlay specifically but

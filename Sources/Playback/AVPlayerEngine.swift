@@ -453,11 +453,21 @@ final class AVPlayerEngine: PlaybackEngine {
                     self?.isBuffering = buffering
                 }
             },
-            player.observe(\.isExternalPlaybackActive, options: [.new, .old]) { [weak self] player, change in
-                // Only the *end* of an external route needs handling; the start
-                // is AVFoundation handing the stream off, which it does cleanly.
-                guard change.oldValue == true, !player.isExternalPlaybackActive else { return }
-                Task { @MainActor [weak self] in self?.reattachVideoLayer() }
+            player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] player, _ in
+                let external = player.isExternalPlaybackActive
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // Logged in both directions, and compared against our own
+                    // record rather than the KVO's `.old` — when this reported
+                    // "neither line, still stuck", the first thing worth knowing
+                    // was whether the route change was seen at all.
+                    Self.log.notice("external playback \(external ? "began" : "ended", privacy: .public)")
+                    let wasExternal = self.isExternalRoute
+                    self.isExternalRoute = external
+                    // Only the *end* needs handling; the start is AVFoundation
+                    // handing the stream off, which it does cleanly.
+                    if wasExternal, !external { self.reattachVideoLayer() }
+                }
             },
         ]
         itemStartedAt = .now
@@ -504,9 +514,20 @@ final class AVPlayerEngine: PlaybackEngine {
 
     // MARK: - Live-edge recovery
 
-    /// Periodic observer token. Held because it must be removed by hand —
-    /// unlike KVO, a time observer outlives its player until it is.
-    @ObservationIgnored private var liveEdgeObserver: Any?
+    /// The wall-clock ticker driving catch-up and stall detection.
+    @ObservationIgnored private var watchTask: Task<Void, Never>?
+
+    /// Our own record of the route, so the end of one is detected from a value
+    /// we control rather than from KVO change bookkeeping.
+    @ObservationIgnored private var isExternalRoute = false
+
+    /// Whether this item has ever been ready to play.
+    ///
+    /// The stall watchdog only applies *after* that. Before it, a stream is
+    /// merely starting, and `PlayerModel`'s connect loop already owns that phase
+    /// with its own timeout and retries — a second recovery running underneath
+    /// it would fight it and open extra upstream connections.
+    @ObservationIgnored private var hasBeenReady = false
 
     @ObservationIgnored private var stallObserver: NotificationToken?
 
@@ -572,21 +593,31 @@ final class AVPlayerEngine: PlaybackEngine {
         positionAtLastCatchUp = nil
         stalledTicks = 0
         stalledPosition = nil
-        // Once a second. The threshold is 8s, so a finer interval buys nothing
-        // and a coarser one lets the gap grow while we are not looking.
-        liveEdgeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.watchTicks += 1
+        hasBeenReady = false
+        isExternalRoute = player.isExternalPlaybackActive
+        // **A wall clock, not `addPeriodicTimeObserver`.**
+        //
+        // The observer fires on *playback time* advancing, so it goes quiet
+        // exactly when playback stops — which is the only moment any of this
+        // matters. It appeared to work for a while only because our own seeks
+        // were nudging the timebase and keeping it alive; once the seek storm
+        // was rate-limited away, the detector went silent with it and a stuck
+        // stream produced no catch-up, no stall report and no recovery. That is
+        // a watchdog driven by the thing it is watching.
+        //
+        // `Task.sleep` keeps ticking whatever the player is doing.
+        watchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+
+                watchTicks += 1
                 // Every 2s, and only until a frame has actually arrived.
-                if self.watchTicks % 2 == 0, (self.snapshot.width ?? 0) == 0 {
-                    self.logDiagnostics(reason: "connecting")
+                if watchTicks % 2 == 0, (snapshot.width ?? 0) == 0 {
+                    logDiagnostics(reason: "connecting")
                 }
-                self.checkForStall()
-                self.catchUpToLiveEdge()
+                checkForStall()
+                catchUpToLiveEdge()
             }
         }
     }
@@ -601,17 +632,43 @@ final class AVPlayerEngine: PlaybackEngine {
     /// window discarded long ago, and with no seekable range to jump to there
     /// was nothing for the catch-up to correct.
     private func checkForStall() {
-        guard let item = player.currentItem, item.status == .readyToPlay else {
+        guard let item = player.currentItem else {
             stalledTicks = 0
             return
         }
-        // Waiting *and* not moving. Either alone is normal: a healthy stream
-        // waits briefly at a rebuffer, and a paused one does not move.
-        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+
+        if item.status == .readyToPlay { hasBeenReady = true }
+        guard hasBeenReady else {
+            stalledTicks = 0
+            return
+        }
+
+        // A failed item is not going to recover on its own, and waiting out the
+        // full interval only delays the rebuild.
+        if item.status == .failed {
+            Self.log.error("item failed, rebuilding")
+            stalledTicks = 0
+            recoverWedgedStream()
+            return
+        }
+
+        // **An item that never becomes ready counts as stuck.** The first
+        // version required `.readyToPlay` before it would count anything, so a
+        // stream that came back from AirPlay in some other state reset the
+        // counter every tick and could never trip the watchdog — which is
+        // exactly the "neither line, still stuck" report.
         let position = CMTimeGetSeconds(item.currentTime())
         let frozen = stalledPosition.map { abs(position - $0) < 0.01 } ?? false
+        let stuck: Bool
+        if item.status != .readyToPlay {
+            stuck = true
+        } else {
+            // Waiting *and* not moving. Either alone is normal: a healthy stream
+            // waits briefly at a rebuffer, and a paused one does not move.
+            stuck = player.timeControlStatus == .waitingToPlayAtSpecifiedRate && frozen
+        }
 
-        guard waiting, frozen else {
+        guard stuck, player.timeControlStatus != .paused else {
             stalledTicks = 0
             stalledPosition = position.isFinite ? position : nil
             return
@@ -650,10 +707,8 @@ final class AVPlayerEngine: PlaybackEngine {
     }
 
     private func stopLiveEdgeWatch() {
-        if let liveEdgeObserver {
-            player.removeTimeObserver(liveEdgeObserver)
-            self.liveEdgeObserver = nil
-        }
+        watchTask?.cancel()
+        watchTask = nil
         stallObserver = nil
     }
 
