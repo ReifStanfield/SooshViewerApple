@@ -208,19 +208,31 @@ import SwiftUI
                     .tint(.white)
 
             case .playing:
-                Button {
-                    engine.playOrPause()
-                    model.pokeControls()
-                } label: {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 34))
-                        .foregroundStyle(.white)
+                // Waiting for data is not the same as paused — see
+                // `catalystPlayPause`. Rebuffering mid-stream shows the spinner
+                // rather than inviting a tap that would stop it.
+                if engine.isBuffering {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.large)
+                        .tint(.white)
                         .frame(width: 72, height: 72)
-                        .contentShape(Circle())
+                        .accessibilityLabel("Loading")
+                } else {
+                    Button {
+                        engine.playOrPause()
+                        model.pokeControls()
+                    } label: {
+                        Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.white)
+                            .frame(width: 72, height: 72)
+                            .contentShape(Circle())
+                    }
+                    // Cross-fades the glyph instead of popping it.
+                    .contentTransition(.symbolEffect(.replace))
+                    .glassEffect(.regular.interactive(), in: Circle())
                 }
-                // Cross-fades the glyph instead of popping it.
-                .contentTransition(.symbolEffect(.replace))
-                .glassEffect(.regular.interactive(), in: Circle())
 
             case .failed:
                 EmptyView()  // the failure overlay in PlayerView owns this state
@@ -386,21 +398,38 @@ import SwiftUI
                 .padding(.bottom, 14)
             }
 
+            /// Play, pause, or *waiting* — three states, because the player has
+            /// three.
+            ///
+            /// Showing the play glyph while the player is waiting for data reads
+            /// as "stopped, press to resume", and pressing it then pauses the
+            /// stream that was about to start. This is what made returning from
+            /// AirPlay unreadable: a black picture and a play button, with no way
+            /// to tell loading from stopped.
             @ViewBuilder
             private var catalystPlayPause: some View {
                 if case .playing = model.state {
-                    Button {
-                        engine.playOrPause()
-                        model.pokeControls()
-                    } label: {
-                        Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.white)
+                    if engine.isBuffering {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
                             .frame(width: 56, height: 56)
-                            .contentShape(Circle())
+                            .glassEffect(.regular, in: Circle())
+                            .accessibilityLabel("Loading")
+                    } else {
+                        Button {
+                            engine.playOrPause()
+                            model.pokeControls()
+                        } label: {
+                            Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 26))
+                                .foregroundStyle(.white)
+                                .frame(width: 56, height: 56)
+                                .contentShape(Circle())
+                        }
+                        .contentTransition(.symbolEffect(.replace))
+                        .glassEffect(.regular.interactive(), in: Circle())
                     }
-                    .contentTransition(.symbolEffect(.replace))
-                    .glassEffect(.regular.interactive(), in: Circle())
                 }
             }
 

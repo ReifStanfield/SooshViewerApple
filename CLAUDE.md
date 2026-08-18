@@ -216,10 +216,18 @@ no decoder.
   over a frozen or black frame while every other indicator looks healthy.
   Measured on Catalyst: first frame **3.15s** after the item starts, twice,
   to four decimal places.
+- **`timeControlStatus` has three states and the UI needs all three.** Paused,
+  *waiting to play at the specified rate*, and playing. Collapsing the middle
+  one into "paused" put a play button over a black screen while the stream was
+  still loading — and pressing it would have stopped the playback that was about
+  to start. `AVPlayerEngine.isBuffering` is the third state; the controls show a
+  spinner for it.
 - **An ended AirPlay route leaves the local layer without a picture.** The layer
   is not reliably re-acquired, so the fix is to set `layer.player` again on the
-  transition. `AVPlayerEngine.adoptVideoLayer` exists to hold the layer for this
-  and for PiP.
+  transition — **and to call `play()`, because the route also ends paused and
+  nothing else restarts it.** `AVPlayerEngine.adoptVideoLayer` exists to hold the
+  layer for this and for PiP. The catch-up cooldown is cleared at the same time,
+  since the window slid for the whole time the picture was on the television.
 - **A player whose position does not move is wedged, not lagging, and seeking
   will never fix it.** Caught from the catch-up log: the window slid from
   `96.25…107.73` to `135.15…146.64` while `currentTime()` stayed pinned at
@@ -333,7 +341,8 @@ by deleting the suspect:**
 | Spinner forever, no error anywhere | Forward buffer capped below one segment |
 | Rapid play/pause after AirPlaying | Catch-up seeking against the receiver's timebase |
 | Repeated jumps, position never moves | Player wedged, not lagging — seeking cannot fix it |
-| Black frame after AirPlay returns | Layer never re-acquired the player |
+| Black frame after AirPlay returns | Layer never re-acquired the player, and nothing resumed it |
+| Play button shown while still loading | `timeControlStatus` has three states, not two |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning

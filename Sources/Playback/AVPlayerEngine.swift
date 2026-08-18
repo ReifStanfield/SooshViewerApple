@@ -31,6 +31,16 @@ final class AVPlayerEngine: PlaybackEngine {
 
     private(set) var lastError: String?
     private(set) var isPlaying: Bool = false
+
+    /// True when the player wants to play but has nothing to play yet.
+    ///
+    /// **Distinct from `!isPlaying`, and the difference is the whole complaint.**
+    /// `timeControlStatus` has three states, not two: paused, *waiting to play at
+    /// the specified rate*, and playing. Collapsing the middle one into "paused"
+    /// is what left a viewer returning from AirPlay looking at a black screen
+    /// with a play button, unable to tell whether it was stopped or still
+    /// loading.
+    private(set) var isBuffering: Bool = false
     private var audioChannelCount: Int?
 
     /// KVO tokens. Held so they can be invalidated — an observation that
@@ -151,10 +161,26 @@ final class AVPlayerEngine: PlaybackEngine {
     /// again is what forces it to re-acquire, and it is cheap enough to do
     /// unconditionally on the transition.
     private func reattachVideoLayer() {
-        guard let videoLayer else { return }
-        Self.log.notice("external route ended, reattaching the video layer")
-        videoLayer.player = nil
-        videoLayer.player = player
+        Self.log.notice("external route ended, reattaching and resuming")
+
+        if let videoLayer {
+            videoLayer.player = nil
+            videoLayer.player = player
+        }
+
+        // **Ending an external route leaves the player paused, and nothing
+        // restarts it.** The reported symptom was a black screen with the
+        // control showing the paused glyph — which was an honest reading of the
+        // player, just not of what the viewer wanted. Reattaching the layer
+        // gives it somewhere to draw; this gives it a reason to.
+        player.play()
+
+        // The window kept sliding for the whole time the picture was on the
+        // television, so the position is almost certainly behind it now. Clear
+        // the cooldown so the next tick may correct immediately rather than
+        // waiting out an interval that was meant for repeated failures.
+        lastCatchUpAt = nil
+        positionAtLastCatchUp = nil
     }
 
     /// The live rewrap, when this stream is a raw transport stream.
@@ -413,7 +439,11 @@ final class AVPlayerEngine: PlaybackEngine {
             },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
                 let playing = player.timeControlStatus == .playing
-                Task { @MainActor [weak self] in self?.isPlaying = playing }
+                let buffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                Task { @MainActor [weak self] in
+                    self?.isPlaying = playing
+                    self?.isBuffering = buffering
+                }
             },
             player.observe(\.isExternalPlaybackActive, options: [.new, .old]) { [weak self] player, change in
                 // Only the *end* of an external route needs handling; the start
@@ -715,6 +745,7 @@ final class AVPlayerEngine: PlaybackEngine {
 
         lastError = nil
         isPlaying = false
+        isBuffering = false
         audioChannelCount = nil
         // Cleared so a player that has been torn down cannot later decide to
         // rebuild itself. `recoverWedgedStream` reads this before it spawns its
