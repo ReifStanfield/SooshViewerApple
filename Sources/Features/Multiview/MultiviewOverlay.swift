@@ -10,11 +10,37 @@ import SwiftUI
 struct MultiviewOverlay: View {
     @Bindable var multiview: MultiviewModel
 
-    /// Corner-window width. Two of these plus the gaps bound how far the
-    /// single-stream case intrudes on the app.
-    private let cornerTileWidth: CGFloat = 240
+    /// The size of whatever the overlay is drawn over, so tiles can be sized
+    /// against it.
+    ///
+    /// **Proportional rather than a fixed point size.** A 240pt window is
+    /// reasonable on a phone and a postage stamp on a full-screen Mac, and the
+    /// tiles were reported as too small on exactly that. The bounds keep it a
+    /// window at both ends: never so small it cannot be read, never so large it
+    /// stops being a corner.
+    @State private var containerSize: CGSize = .zero
+
+    /// Width of a corner window over the app.
+    private var cornerTileWidth: CGFloat {
+        min(max(containerSize.width * 0.32, 300), 520)
+    }
+
+    /// Width of the small tiles riding along the bottom in `.focus`.
+    private var focusSecondaryWidth: CGFloat {
+        min(max(containerSize.width * 0.2, 240), 400)
+    }
 
     var body: some View {
+        content
+            .onGeometryChange(for: CGSize.self) { proxy in
+                proxy.size
+            } action: { size in
+                containerSize = size
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch multiview.presentation {
         case .corner:
             cornerWindows

@@ -148,6 +148,12 @@ Two layouts: an even grid (two side by side, four as a 2x2), and focus — one
 stream at full size with the rest small along its bottom edge, over the picture
 rather than beside it so the one being watched keeps the frame.
 
+**Tile sizes are proportional to the window, not fixed points.** 240pt is a
+sensible window on a phone and a postage stamp on a full-screen Mac, which is
+exactly how it was reported. The corner window is 32% of the container bounded
+to 300–520pt, and the focus row's tiles 20% bounded to 240–400pt — the bounds
+are what keep it a window at both extremes rather than a panel or a speck.
+
 **`MultiviewModel` is owned by `RootView`, above the navigation stack**, and
 that placement is the design rather than a convenience. A tile has to keep
 playing while you browse home, open a category and pick the next channel, so the
