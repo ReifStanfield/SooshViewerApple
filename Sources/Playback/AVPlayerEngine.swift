@@ -113,7 +113,12 @@ final class AVPlayerEngine: PlaybackEngine {
 
     func open(url: URL, headers: [String: String]) async throws {
         configureAudioSession()
+        // Captured before `stop()`, which clears it, and before the rewrap
+        // rewrites `url` to the loopback playlist — recovery needs the
+        // *upstream*, not the local server that just failed.
+        let source = (url: url, headers: headers)
         await stop()
+        currentSource = source
 
         // **Raw transport streams are wrapped in HLS before AVFoundation sees
         // them.** This is where the FFmpeg dependency used to be. AVFoundation
@@ -457,6 +462,7 @@ final class AVPlayerEngine: PlaybackEngine {
         stopLiveEdgeWatch()
         watchTicks = 0
         lastCatchUpAt = nil
+        positionAtLastCatchUp = nil
         // Once a second. The threshold is 8s, so a finer interval buys nothing
         // and a coarser one lets the gap grow while we are not looking.
         liveEdgeObserver = player.addPeriodicTimeObserver(
@@ -475,6 +481,27 @@ final class AVPlayerEngine: PlaybackEngine {
         }
     }
 
+    /// Rebuilds the stream from the upstream URL.
+    ///
+    /// Reuses `open()` rather than inventing a second teardown path, so the
+    /// pause-before-release rule and the rewrap's socket handling apply exactly
+    /// as they do on a channel change. Bounded to once a minute: if a rebuild
+    /// does not help, doing it repeatedly is a reconnect loop against a provider
+    /// that counts connections.
+    private func recoverWedgedStream() {
+        guard let currentSource else { return }
+        if let lastRecoveryAt, ContinuousClock.now - lastRecoveryAt < .seconds(60) {
+            Self.log.error("stream wedged again within the recovery interval, leaving it alone")
+            return
+        }
+        lastRecoveryAt = ContinuousClock.now
+        Self.log.notice("rebuilding wedged stream")
+
+        Task { [weak self] in
+            try? await self?.open(url: currentSource.url, headers: currentSource.headers)
+        }
+    }
+
     private func stopLiveEdgeWatch() {
         if let liveEdgeObserver {
             player.removeTimeObserver(liveEdgeObserver)
@@ -485,6 +512,22 @@ final class AVPlayerEngine: PlaybackEngine {
 
     /// When the last catch-up seek was issued, so they cannot stack up.
     @ObservationIgnored private var lastCatchUpAt: ContinuousClock.Instant?
+
+    /// Where playback was at the previous catch-up.
+    ///
+    /// **This is how a wedged player is told apart from a lagging one.** A
+    /// player that is merely behind moves after a seek; a wedged one does not
+    /// move at all. Measured from a real session: the window slid from
+    /// `96.25…107.73` to `135.15…146.64` — forty seconds — while `currentTime()`
+    /// stayed pinned at 100.26 across eight consecutive corrections.
+    @ObservationIgnored private var positionAtLastCatchUp: TimeInterval?
+
+    /// When the stream was last rebuilt because seeking could not revive it.
+    @ObservationIgnored private var lastRecoveryAt: ContinuousClock.Instant?
+
+    /// The upstream this engine is playing, kept so a wedged stream can be
+    /// rebuilt from scratch without the view layer having to notice.
+    @ObservationIgnored private var currentSource: (url: URL, headers: [String: String])?
 
     /// Jumps to the live edge when playback has fallen too far behind it.
     private func catchUpToLiveEdge() {
@@ -540,7 +583,20 @@ final class AVPlayerEngine: PlaybackEngine {
         target=\(String(format: "%.2f", target), privacy: .public)
         """)
 
+        // **A seek that changed nothing means seeking is not the answer.**
+        // If playback has not advanced at all since the last correction, the
+        // item is not lagging behind the window — it has stopped consuming, and
+        // another seek is one more no-op on a pile of them. Rebuild the stream
+        // instead; that is the only thing that has ever revived this state.
+        if let positionAtLastCatchUp, abs(now - positionAtLastCatchUp) < 0.01 {
+            logDiagnostics(reason: "wedged")
+            lastCatchUpAt = attemptedAt
+            recoverWedgedStream()
+            return
+        }
+
         lastCatchUpAt = attemptedAt
+        positionAtLastCatchUp = now
         let wasPlaying = player.timeControlStatus == .playing
 
         player.seek(
@@ -586,6 +642,10 @@ final class AVPlayerEngine: PlaybackEngine {
         lastError = nil
         isPlaying = false
         audioChannelCount = nil
+        // Cleared so a player that has been torn down cannot later decide to
+        // rebuild itself. `recoverWedgedStream` reads this before it spawns its
+        // task, so an in-flight recovery still completes.
+        currentSource = nil
     }
 
     func playOrPause() {

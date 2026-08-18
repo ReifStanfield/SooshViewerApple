@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 62 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 64 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -51,7 +51,7 @@ Sources/Features/     One folder per screen: view + its @Observable model.
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                62 tests: connect loop, logo palette, HLS
+Tests/                64 tests: connect loop, logo palette, HLS
                       server, catalog cache, live-edge policy,
                       live-window timing, playable window.
 ```
@@ -210,6 +210,19 @@ no decoder.
   play/pause *after* a couple of AirPlay sessions. A paused live stream falls
   behind by design, and the seek completion used to `play()` unconditionally,
   restarting playback the viewer had stopped.
+- **A player whose position does not move is wedged, not lagging, and seeking
+  will never fix it.** Caught from the catch-up log: the window slid from
+  `96.25…107.73` to `135.15…146.64` while `currentTime()` stayed pinned at
+  100.26 across eight consecutive corrections. `AVPlayerEngine` now compares the
+  position against the previous correction and rebuilds the stream through
+  `open()` instead of seeking again — bounded to once a minute, since a rebuild
+  is another upstream connection.
+- **Catch-up must not fire while the window is still filling.** A live client
+  starts three target durations back, so at handover it legitimately sits near
+  the start of a short window — measured as position 4.10 against `2.05…13.54`,
+  which produced a jump to live in the first second of every stream. The margin
+  check now requires an established window (a span of at least three margins);
+  true eviction is still corrected at any size.
 - **`seekableTimeRanges.end` is *not* the live edge.** A live client may not seek
   within three target durations of the end, so healthy playback sits *ahead* of
   the seekable range — measured here as `currentTime` 14.81 against `0.00…6.01`.
@@ -309,6 +322,7 @@ by deleting the suspect:**
 | Fine for 20 min, then constant stutter | One long segment ratcheted TARGETDURATION for good |
 | Spinner forever, no error anywhere | Forward buffer capped below one segment |
 | Rapid play/pause after AirPlaying | Catch-up seeking against the receiver's timebase |
+| Repeated jumps, position never moves | Player wedged, not lagging — seeking cannot fix it |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning

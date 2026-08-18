@@ -58,14 +58,21 @@ enum LiveEdgePolicy {
         // the strength of it would be worse than waiting.
         guard seekableEnd > seekableStart else { return nil }
 
-        // Nothing has been evicted yet, so nothing can be stranded. Without this
-        // the margin check fires during the first seconds of every stream, when
-        // the window is still filling and the position is legitimately close to
-        // a `seekableStart` of zero.
-        guard seekableStart > 0 else { return nil }
+        // Behind the window entirely. No amount of waiting recovers this — every
+        // segment request from here is a 404 — so it is worth correcting even
+        // while the window is still filling.
+        if currentTime < seekableStart { return seekableEnd }
 
-        // Behind the window entirely, or close enough that the next eviction
-        // will strand it. This is the case that produces permanent choppiness.
+        // **Proximity to the start only means danger once the window is
+        // established.** While it is still filling, the span is short and the
+        // playhead sits legitimately close to the start, because a live client
+        // begins three target durations back. Measured at handover on a real
+        // channel: position 4.10 against a seekable range of `2.05…13.54`, which
+        // tripped the margin and produced a jump to live in the first second of
+        // every stream. Nothing was being evicted; the window was growing.
+        guard seekableEnd - seekableStart >= margin * 3 else { return nil }
+
+        // Close enough to the start that the next eviction will strand it.
         guard currentTime - seekableStart < margin else { return nil }
         return seekableEnd
     }
