@@ -152,43 +152,43 @@ final class AVPlayerEngine: PlaybackEngine {
 
     @ObservationIgnored private var layerObservation: NSKeyValueObservation?
 
-    /// Re-points the layer at the player after an external route ends.
+    /// Rebuilds the stream when AirPlay hands playback back.
     ///
-    /// **AirPlay leaves the local layer without a picture.** While the route is
-    /// external the layer has nothing to draw, and when playback comes back it
-    /// is not reliably re-attached — the symptom is a black or frozen frame that
-    /// clears only when something else disturbs the layer. Setting `player`
-    /// again is what forces it to re-acquire, and it is cheap enough to do
-    /// unconditionally on the transition.
-    private func reattachVideoLayer() {
-        Self.log.notice("external route ended, reattaching and resuming")
+    /// **Straight to a rebuild, rather than trying to revive the old item.**
+    /// Reattaching the layer and calling `play()` was tried first for two
+    /// rounds, on the reasoning that it costs nothing when it works. It does not
+    /// work: while the route was external the *receiver* consumed the stream, so
+    /// the local item is left at a position the sliding window discarded long
+    /// ago, with no seekable range to jump to. It cannot be revived, only
+    /// replaced — and leaving the stall watchdog to reach that conclusion spends
+    /// ten seconds proving something already known.
+    ///
+    /// The arithmetic, measured on Catalyst: a rebuild reaches a playable window
+    /// in 0.7s when the upstream bursts on connect, a few seconds when it does
+    /// not, and a first frame 3.15s after that — so ~4-9s in total. Going
+    /// through the watchdog costs all of that plus its ten-second interval.
+    ///
+    /// The price is one upstream connection per AirPlay toggle: the same as a
+    /// channel change, and bounded by a user action rather than by a loop.
+    private func handleExternalRouteEnded() {
+        Self.log.notice("external route ended, rebuilding the stream")
 
+        // Cheap, and the replacement item draws into this same layer.
         if let videoLayer {
             videoLayer.player = nil
             videoLayer.player = player
         }
 
-        // **Ending an external route leaves the player paused, and nothing
-        // restarts it.** The reported symptom was a black screen with the
-        // control showing the paused glyph — which was an honest reading of the
-        // player, just not of what the viewer wanted. Reattaching the layer
-        // gives it somewhere to draw; this gives it a reason to.
-        player.play()
-
-        // The window kept sliding for the whole time the picture was on the
-        // television, so the position is almost certainly behind it now. Clear
-        // the cooldowns so the next tick may correct immediately rather than
-        // waiting out intervals meant for repeated failures.
-        //
-        // `lastRecoveryAt` included: a route change is a legitimate, user-caused
-        // reason to rebuild, not the runaway reconnecting that bound is there to
-        // prevent. Reattaching and resuming is tried first and costs nothing; if
-        // it does not take, the stall watchdog rebuilds ten seconds later.
+        // A route change is a legitimate, user-caused reason to rebuild, not the
+        // runaway reconnecting the cooldown exists to prevent.
         lastRecoveryAt = nil
         stalledTicks = 0
         stalledPosition = nil
         lastCatchUpAt = nil
         positionAtLastCatchUp = nil
+        userPaused = false
+
+        recoverWedgedStream()
     }
 
     /// The live rewrap, when this stream is a raw transport stream.
@@ -466,7 +466,7 @@ final class AVPlayerEngine: PlaybackEngine {
                     self.isExternalRoute = external
                     // Only the *end* needs handling; the start is AVFoundation
                     // handing the stream off, which it does cleanly.
-                    if wasExternal, !external { self.reattachVideoLayer() }
+                    if wasExternal, !external { self.handleExternalRouteEnded() }
                 }
             },
         ]

@@ -251,7 +251,16 @@ no decoder.
   window sliding past the position while something else held the player, a seek
   that landed nowhere. One rule catches all of them and needs no theory about
   which happened.
-- **An ended AirPlay route leaves the local layer without a picture.** The layer
+- **An ended AirPlay route rebuilds the stream rather than reviving it.**
+  Reattaching the layer and calling `play()` was tried for two rounds on the
+  reasoning that it costs nothing when it works — it does not work. While the
+  route is external the *receiver* consumes the stream, so the local item is
+  left at a position the window discarded long ago with no seekable range to
+  jump to. Measured: a rebuild reaches a playable window in 0.7s when the
+  upstream bursts on connect and a first frame 3.15s later, so ~4-9s total;
+  letting the stall watchdog discover it costs all of that plus its ten-second
+  interval. The layer is still reattached, since the replacement item draws into
+  it. The layer
   is not reliably re-acquired, so the fix is to set `layer.player` again on the
   transition — **and to call `play()`, because the route also ends paused and
   nothing else restarts it.** `AVPlayerEngine.adoptVideoLayer` exists to hold the
@@ -370,7 +379,7 @@ by deleting the suspect:**
 | Spinner forever, no error anywhere | Forward buffer capped below one segment |
 | Rapid play/pause after AirPlaying | Catch-up seeking against the receiver's timebase |
 | Repeated jumps, position never moves | Player wedged, not lagging — seeking cannot fix it |
-| Black frame after AirPlay returns | Layer never re-acquired the player, and nothing resumed it |
+| Black frame after AirPlay returns | Local item left at a position the window discarded |
 | Play button shown while still loading | `timeControlStatus` has three states, not two |
 | Loads forever after AirPlay returns | Resumed at a position the window had discarded |
 | Recovers but sits paused | A correction that resumed only if already `.playing` |
