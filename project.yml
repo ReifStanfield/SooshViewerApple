@@ -92,6 +92,13 @@ targets:
         # HTTPS and stays subject to ATS.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Required because the rewrap's HLS server accepts connections from the
+        # local network, which is what lets an AirPlay receiver fetch the
+        # playlist. Without a stated purpose the OS can refuse the access with
+        # no error the app can see.
+        NSLocalNetworkUsageDescription: >-
+          Soosh streams live TV to AirPlay devices on your network by serving
+          the video from this device.
         UILaunchScreen: {}
         # Required for Picture in Picture and for audio to survive
         # backgrounding. Without it PiP starts and immediately stops.
@@ -175,6 +182,13 @@ targets:
         # HTTPS and stays subject to ATS.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Required because the rewrap's HLS server accepts connections from the
+        # local network, which is what lets an AirPlay receiver fetch the
+        # playlist. Without a stated purpose the OS can refuse the access with
+        # no error the app can see.
+        NSLocalNetworkUsageDescription: >-
+          Soosh streams live TV to AirPlay devices on your network by serving
+          the video from this device.
         # A real Mac app, not a menu-bar accessory.
         LSApplicationCategoryType: public.app-category.entertainment
         DISPATCHARR_URL: $(DISPATCHARR_URL)
@@ -224,6 +238,13 @@ targets:
         # HTTPS and stays subject to ATS.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Required because the rewrap's HLS server accepts connections from the
+        # local network, which is what lets an AirPlay receiver fetch the
+        # playlist. Without a stated purpose the OS can refuse the access with
+        # no error the app can see.
+        NSLocalNetworkUsageDescription: >-
+          Soosh streams live TV to AirPlay devices on your network by serving
+          the video from this device.
         DISPATCHARR_URL: $(DISPATCHARR_URL)
         DISPATCHARR_USER: $(DISPATCHARR_USER)
         DISPATCHARR_PASS: $(DISPATCHARR_PASS)

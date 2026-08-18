@@ -30,7 +30,7 @@ struct LocalHLSServerTests {
 
     @Test("the playlist is a live playlist, not a finished one")
     func playlistIsLive() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -52,7 +52,7 @@ struct LocalHLSServerTests {
 
     @Test("segment URIs resolve to URLs the server actually serves")
     func segmentURIsResolve() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -79,7 +79,7 @@ struct LocalHLSServerTests {
 
     @Test("a segment evicted from the window is refused rather than mis-served")
     func evictedSegmentIsNotFound() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -126,7 +126,7 @@ struct LiveWindowTimingTests {
 
     @Test("target duration recovers once a long segment leaves the window")
     func targetDurationSelfHeals() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -145,7 +145,7 @@ struct LiveWindowTimingTests {
 
     @Test("the window outlasts three target durations even at the worst segment length")
     func windowOutlastsThreeTargetDurations() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -168,7 +168,7 @@ struct LiveWindowTimingTests {
 
     @Test("an out-of-order segment is dropped rather than walking the sequence backwards")
     func outOfOrderSegmentIsDropped() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
 
@@ -200,13 +200,13 @@ struct PlayableWindowTests {
 
     @Test("an empty window is not playable")
     func emptyWindowIsNotPlayable() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         #expect(await server.hasPlayableWindow == false)
     }
 
     @Test("two segments are not enough to start a live stream")
     func twoSegmentsAreNotEnough() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         for index in 0 ..< 2 { await server.publish(makeSegment(index: index, duration: 2.5)) }
         // 5s of window against a 3s target: a client starting 9s back has
         // nowhere to go. This is the case that stalled the join.
@@ -215,7 +215,7 @@ struct PlayableWindowTests {
 
     @Test("a window covering three target durations plus headroom is playable")
     func sufficientWindowIsPlayable() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         var index = 0
         // 2.5s segments -> target 3 -> needs 9s + 2.5s headroom = 11.5s.
         while await !server.hasPlayableWindow {
@@ -228,7 +228,7 @@ struct PlayableWindowTests {
 
     @Test("the playlist advertises no EXT-X-START")
     func noStartTag() async throws {
-        let server = LocalHLSServer()
+        let server = LocalHLSServer(preferLocalNetworkAddress: false)
         _ = try await server.start()
         defer { Task { await server.stop() } }
         for index in 0 ..< 6 { await server.publish(makeSegment(index: index, duration: 2.5)) }

@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 61 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 62 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -51,7 +51,7 @@ Sources/Features/     One folder per screen: view + its @Observable model.
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                61 tests: connect loop, logo palette, HLS
+Tests/                62 tests: connect loop, logo palette, HLS
                       server, catalog cache, live-edge policy,
                       live-window timing, playable window.
 ```
@@ -197,6 +197,19 @@ no decoder.
   the periodic check in `AVPlayerEngine` jumps to live when the window's start
   catches up to the position. The window is 10 segments so short switches resume
   seamlessly instead of jumping.
+- **AirPlay needs a LAN-reachable URL, so the server is not loopback-only.**
+  AirPlay of HLS hands the *playlist URL* to the receiver, and an Apple TV
+  resolving `127.0.0.1` reaches itself — measured as HTTP 200 on loopback and
+  unreachable on this machine's LAN address. `LocalHLSServer` binds every
+  interface and advertises the LAN address, guarded by the per-session UUID that
+  every path already required. `NSLocalNetworkUsageDescription` is required with
+  it.
+- **Catch-up must not run while AirPlay is active, while paused, or more than
+  once every few seconds.** The receiver owns the position on an external route,
+  so seeking from this side knocks its timebase out — which showed as rapid
+  play/pause *after* a couple of AirPlay sessions. A paused live stream falls
+  behind by design, and the seek completion used to `play()` unconditionally,
+  restarting playback the viewer had stopped.
 - **`seekableTimeRanges.end` is *not* the live edge.** A live client may not seek
   within three target durations of the end, so healthy playback sits *ahead* of
   the seekable range — measured here as `currentTime` 14.81 against `0.00…6.01`.
@@ -295,6 +308,7 @@ by deleting the suspect:**
 | Video freezes on app switch, choppy after | Player evicted from a window that kept sliding |
 | Fine for 20 min, then constant stutter | One long segment ratcheted TARGETDURATION for good |
 | Spinner forever, no error anywhere | Forward buffer capped below one segment |
+| Rapid play/pause after AirPlaying | Catch-up seeking against the receiver's timebase |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning

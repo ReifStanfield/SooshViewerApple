@@ -81,3 +81,38 @@ struct LiveEdgePolicyTests {
         #expect(LiveEdgePolicy.evictionMargin < 25)
     }
 }
+
+/// The catch-up *decision* is `LiveEdgePolicy`; the guards around actually
+/// issuing the seek live in `AVPlayerEngine.catchUpToLiveEdge`, because they
+/// depend on player state this type deliberately knows nothing about.
+///
+/// They are recorded here because each one is a bug that reached a user:
+///
+/// - **External playback.** On AirPlay the receiver owns the position and does
+///   its own buffering. Seeking from the sending side fights it and knocks the
+///   receiver's timebase out, which showed as a stream that rapidly played and
+///   paused on Catalyst *after a couple of AirPlay sessions* — the giveaway that
+///   it was route-related rather than stream-related.
+/// - **Deliberate pause.** A paused live stream falls behind the window by
+///   design; that is what pausing live TV is. The seek completion used to call
+///   `play()` unconditionally, so a correction restarted playback the viewer had
+///   stopped.
+/// - **Seek storms.** A seek that does not take was re-issued every second, and
+///   a seek per second is indistinguishable from a stutter. Corrections are now
+///   rate-limited so the worst case is one visible jump per interval.
+///
+/// Asserting them properly needs a seekable `AVPlayer` fake, which
+/// `PlaybackEngine` does not currently expose — `AVPlayerEngine` owns its
+/// player outright. Left as a note rather than a silently missing case.
+@Suite("Live edge guards")
+struct LiveEdgeGuardTests {
+    @Test("the policy still answers on the numbers alone")
+    func policyIsIndependentOfPlayerState() {
+        // The guards are the engine's job. The policy must stay a pure function
+        // of the window, or it cannot be reasoned about in isolation.
+        let target = LiveEdgePolicy.catchUpTarget(
+            currentTime: 90, seekableStart: 100, seekableEnd: 106
+        )
+        #expect(target == 106)
+    }
+}

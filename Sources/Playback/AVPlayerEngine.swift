@@ -456,6 +456,7 @@ final class AVPlayerEngine: PlaybackEngine {
     private func startLiveEdgeWatch() {
         stopLiveEdgeWatch()
         watchTicks = 0
+        lastCatchUpAt = nil
         // Once a second. The threshold is 8s, so a finer interval buys nothing
         // and a coarser one lets the gap grow while we are not looking.
         liveEdgeObserver = player.addPeriodicTimeObserver(
@@ -482,9 +483,35 @@ final class AVPlayerEngine: PlaybackEngine {
         stallObserver = nil
     }
 
+    /// When the last catch-up seek was issued, so they cannot stack up.
+    @ObservationIgnored private var lastCatchUpAt: ContinuousClock.Instant?
+
     /// Jumps to the live edge when playback has fallen too far behind it.
     private func catchUpToLiveEdge() {
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
+
+        // **Not while AirPlay is driving playback.** On an external route the
+        // receiver owns the position and does its own buffering; seeking from
+        // this side fights it, and each correction knocks the receiver's timebase
+        // out again, which is what produced a stream that rapidly played and
+        // paused after a couple of AirPlay sessions on Catalyst.
+        guard !player.isExternalPlaybackActive else { return }
+
+        // **Not while deliberately paused.** A paused live stream falls behind
+        // the window by design — that is what pausing live TV *is*. Correcting
+        // it here would seek and then call `play()` below, restarting playback
+        // the viewer had stopped. The correction belongs on the next tick after
+        // they resume, which is where it now happens.
+        guard player.timeControlStatus != .paused else { return }
+
+        // **One correction at a time.** A seek that does not take — because the
+        // route changed under us, or the window moved again while it was in
+        // flight — would otherwise be re-issued every second, and a seek per
+        // second on a live stream is indistinguishable from a stutter. Bounding
+        // it means the worst case degrades to one visible jump per interval
+        // rather than a storm.
+        let attemptedAt = ContinuousClock.now
+        if let lastCatchUpAt, attemptedAt - lastCatchUpAt < .seconds(5) { return }
         // The seekable range *is* the server's sliding window, republished by
         // AVFoundation — which is why this needs no knowledge of segment count
         // or target duration.
@@ -504,12 +531,26 @@ final class AVPlayerEngine: PlaybackEngine {
         // **Tolerance is asymmetric on purpose.** `.zero` after and infinity
         // before lets AVFoundation land on the nearest earlier sync sample
         // rather than decoding forward to hit an exact time it does not need to.
+        // A jump to live is a visible discontinuity for the viewer, so it is
+        // worth a line every time — a *repeated* jump is the signature of the
+        // policy fighting the stream rather than correcting it.
+        Self.log.notice("""
+        catch-up seek: pos=\(String(format: "%.2f", now), privacy: .public) \
+        seekable=\(String(format: "%.2f", start), privacy: .public)…\(String(format: "%.2f", end), privacy: .public) \
+        target=\(String(format: "%.2f", target), privacy: .public)
+        """)
+
+        lastCatchUpAt = attemptedAt
+        let wasPlaying = player.timeControlStatus == .playing
+
         player.seek(
             to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .positiveInfinity,
             toleranceAfter: .zero
         ) { [weak self] finished in
-            guard finished else { return }
+            // Only resume what was already running. Calling `play()`
+            // unconditionally turns a correction into a command.
+            guard finished, wasPlaying else { return }
             MainActor.assumeIsolated { self?.player.play() }
         }
     }

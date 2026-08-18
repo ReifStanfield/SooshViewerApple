@@ -14,8 +14,8 @@ import os
 /// wrote and tests — the one that handles live windows, sequence rollover and
 /// buffering — and our side stays a few hundred bytes of HTTP.
 ///
-/// The cost is one listening socket, bound to loopback so it is not reachable
-/// off-device.
+/// The cost is one listening socket on the local network, guarded by a
+/// per-session UUID in every path — see `start()` for why it is not loopback.
 actor LocalHLSServer {
     enum ServerError: Error, LocalizedError {
         case listenerFailed(String)
@@ -88,15 +88,30 @@ actor LocalHLSServer {
 
     private let queue = DispatchQueue(label: "com.soosh.viewer.hls-server")
 
-    init() {}
+    /// Whether to advertise the LAN address. Tests pin this to `false` so they
+    /// exercise loopback and do not depend on the machine having a network.
+    private let preferLocalNetworkAddress: Bool
+
+    init(preferLocalNetworkAddress: Bool = true) {
+        self.preferLocalNetworkAddress = preferLocalNetworkAddress
+    }
 
     // MARK: - Lifecycle
 
     func start() async throws -> UInt16 {
         let parameters = NWParameters.tcp
-        // Loopback only. `NWListener` would otherwise bind every interface,
-        // which would put the raw stream on the local network.
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        // **Every interface, not just loopback — and that is a deliberate
+        // reversal.** This was bound to 127.0.0.1 so the raw stream could not
+        // reach the local network. That is the safer posture and it makes
+        // AirPlay impossible: AirPlay of an HLS stream hands the *playlist URL*
+        // to the receiver, and an Apple TV resolving `127.0.0.1` reaches itself.
+        // Measured before the change: HTTP 200 on loopback, unreachable on this
+        // machine's LAN address, which is exactly what the receiver saw.
+        //
+        // What keeps this from being an open video server on the LAN is the
+        // session token in every path: 122 bits of UUID, required on the
+        // playlist and on every segment, regenerated per session, and serving
+        // nothing once the session stops. See `token` and `handle(_:)`.
         parameters.allowLocalEndpointReuse = true
 
         let listener: NWListener
@@ -138,12 +153,61 @@ actor LocalHLSServer {
     }
 
     /// URL to hand to AVPlayer.
+    ///
+    /// **Advertises this machine's LAN address when it has one**, falling back
+    /// to loopback when it does not. One URL has to work for both the local
+    /// player and an AirPlay receiver, and only the LAN address does: the
+    /// receiver fetches the playlist itself. Loopback still works locally —
+    /// traffic to your own address never leaves the machine — so there is no
+    /// second code path for the ordinary case.
+    ///
+    /// The address is resolved once per session rather than per request; a
+    /// machine that changes network mid-stream invalidates the URL and needs the
+    /// channel reopened.
     func playlistURL() throws -> URL {
         guard let port else { throw ServerError.noPort }
-        guard let url = URL(string: "http://127.0.0.1:\(port)/\(token)/live.m3u8") else {
+        let host = advertisedHost ?? "127.0.0.1"
+        guard let url = URL(string: "http://\(host):\(port)/\(token)/live.m3u8") else {
             throw ServerError.noPort
         }
         return url
+    }
+
+    /// This machine's LAN address, or nil when it has none or is not wanted.
+    private var advertisedHost: String? {
+        guard preferLocalNetworkAddress else { return nil }
+        return Self.localNetworkAddress()
+    }
+
+    /// The first usable IPv4 address on an up, non-loopback interface.
+    ///
+    /// Prefers `en*` — Wi-Fi and Ethernet — over tunnels and bridges, because a
+    /// VPN's `utun` address is routable for this machine but generally not for
+    /// an Apple TV sitting on the same Wi-Fi.
+    private static func localNetworkAddress() -> String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(head) }
+
+        var fallback: String?
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(pointer.pointee.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            guard let address = pointer.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                address, socklen_t(address.pointee.sa_len),
+                &buffer, socklen_t(buffer.count),
+                nil, 0, NI_NUMERICHOST
+            ) == 0 else { continue }
+
+            let ip = String(cString: buffer)
+            if String(cString: pointer.pointee.ifa_name).hasPrefix("en") { return ip }
+            if fallback == nil { fallback = ip }
+        }
+        return fallback
     }
 
     // MARK: - Publishing
