@@ -15,6 +15,9 @@ import SwiftUI
         var logoURL: URL? = nil
         let onBack: () -> Void
 
+        /// Hands this channel to the multiview grid and leaves the player.
+        var onMultiview: () -> Void = {}
+
         #if targetEnvironment(macCatalyst)
             /// Width of the timeline row, and of the LIVE badge that rides on it.
             ///
@@ -261,7 +264,7 @@ import SwiftUI
                             model.pokeControls()
                         }
                         PillButton(systemImage: "plus.rectangle.on.rectangle") {
-                            model.pokeControls()  // TODO: multiview
+                            onMultiview()
                         }
                         PillButton(systemImage: "arrow.up.left.and.arrow.down.right") {
                             toggleFullScreen()
@@ -377,7 +380,7 @@ import SwiftUI
                                     model.pokeControls()  // TODO: favourites
                                 }
                                 PillButton(systemImage: "plus.rectangle.on.rectangle") {
-                                    model.pokeControls()  // TODO: multiview
+                                    onMultiview()
                                 }
                                 subtitleMenu
                                 audioMenu {

@@ -170,6 +170,9 @@ struct PlayerView: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// The multiview session, for the "add to grid" control.
+    @Environment(MultiviewModel.self) private var multiview
+
     /// Connecting spinner and the retry path. Separate from the control
     /// overlay so it stays up when the controls auto-hide.
     @ViewBuilder
@@ -223,7 +226,26 @@ struct PlayerView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.toggleControls() }
 
-                PlayerControlsView(model: model, engine: engine, logoURL: logoURL) { dismiss() }
+                PlayerControlsView(
+                    model: model,
+                    engine: engine,
+                    logoURL: logoURL,
+                    onBack: { dismiss() },
+                    // **The full-screen player is torn down as it tiles.** The
+                    // tile builds its own `PlayerModel`, so leaving this one
+                    // running would mean two connections to the same channel —
+                    // and the provider counts both. `onDisappear` already calls
+                    // `teardown()`, so dismissing is the teardown.
+                    onMultiview: {
+                        multiview.add(
+                            channel: channel,
+                            streamURL: streamURL,
+                            programs: programs,
+                            logoURL: logoURL
+                        )
+                        dismiss()
+                    }
+                )
 
                 failureOverlay(model)
             }

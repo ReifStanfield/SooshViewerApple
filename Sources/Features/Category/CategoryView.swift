@@ -20,6 +20,28 @@ struct CategoryView: View {
     /// from here should return *here*, not to the homepage.
     @State private var playingChannel: Channel?
 
+    /// The multiview session, if tiles are up.
+    @Environment(MultiviewModel.self) private var multiview
+
+    /// One door for every channel tap on this screen.
+    ///
+    /// **Multiview changes what tapping a channel means**, and it has to change
+    /// it everywhere at once — a carousel card, a guide block, a search result.
+    /// Routing every site through here is what stops "add to the tiles" from
+    /// working on some rows and opening full screen on others.
+    private func open(_ channel: Channel) {
+        guard multiview.isActive else {
+            playingChannel = channel
+            return
+        }
+        // Tiles are up, so the tap belongs to them whether or not there is room.
+        // Falling through to full screen when the grid is full would replace the
+        // multiview you are watching with a single stream, which is the opposite
+        // of what the tap asked for.
+        multiview.add(channel: channel, home: model)
+    }
+
+
     /// The programme whose detail sheet is up — the selection itself, so it can
     /// bind straight to `.sheet(item:)`. See `GuideSelection`.
     @State private var programDetail: GuideSelection?
@@ -87,7 +109,7 @@ struct CategoryView: View {
                     channels: shownChannels,
                     guide: model.guide,
                     logoURLFor: model.catalog.logoURL(for:),
-                    onLogoTap: { playingChannel = $0 },
+                    onLogoTap: { open($0) },
                     onProgramTap: { programDetail = $0 },
                     palette: model.logoPalette
                 )
@@ -159,7 +181,7 @@ struct CategoryView: View {
                 selection: selection,
                 logoURL: model.catalog.logoURL(for: selection.channel),
                 palette: model.logoPalette,
-                onPlay: { playingChannel = $0 }
+                onPlay: { open($0) }
             )
         }
     }

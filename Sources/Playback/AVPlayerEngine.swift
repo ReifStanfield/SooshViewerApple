@@ -879,6 +879,15 @@ final class AVPlayerEngine: PlaybackEngine {
         currentSource = nil
     }
 
+    /// Silences this engine without pausing it.
+    ///
+    /// Multiview needs several streams decoding while only one is audible —
+    /// pausing the others would defeat the point, and four mixed audio tracks
+    /// are unintelligible.
+    func setMuted(_ muted: Bool) {
+        player.isMuted = muted
+    }
+
     func playOrPause() {
         if player.timeControlStatus == .playing {
             // Recorded so the watchdog below can tell a pause the viewer asked

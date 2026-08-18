@@ -18,6 +18,28 @@ struct HomeView: View {
     /// The channel whose player is open, or nil. This *is* the navigation state.
     @State private var playingChannel: Channel?
 
+    /// The multiview session, if tiles are up.
+    @Environment(MultiviewModel.self) private var multiview
+
+    /// One door for every channel tap on this screen.
+    ///
+    /// **Multiview changes what tapping a channel means**, and it has to change
+    /// it everywhere at once — a carousel card, a guide block, a search result.
+    /// Routing every site through here is what stops "add to the tiles" from
+    /// working on some rows and opening full screen on others.
+    private func open(_ channel: Channel) {
+        guard multiview.isActive else {
+            playingChannel = channel
+            return
+        }
+        // Tiles are up, so the tap belongs to them whether or not there is room.
+        // Falling through to full screen when the grid is full would replace the
+        // multiview you are watching with a single stream, which is the opposite
+        // of what the tap asked for.
+        multiview.add(channel: channel, home: model)
+    }
+
+
     /// The category whose page is open, or nil. Same pattern: state-driven, so a
     /// double tap cannot push two copies of the page.
     @State private var openCategory: Category?
@@ -134,7 +156,7 @@ struct HomeView: View {
                         selection: selection,
                         logoURL: model.catalog.logoURL(for: selection.channel),
                         palette: model.logoPalette,
-                        onPlay: { playingChannel = $0 }
+                        onPlay: { open($0) }
                     )
                 }
         }
@@ -170,7 +192,7 @@ struct HomeView: View {
                     // scope chips choose *what kind of thing* you are looking
                     // for, so a narrowed carousel-and-guide would not answer the
                     // question being asked.
-                    SearchResultsView(model: model) { playingChannel = $0 }
+                    SearchResultsView(model: model) { open($0) }
                 } else {
                     continueWatching
                     categoriesGrid
@@ -207,7 +229,7 @@ struct HomeView: View {
                 LazyHStack(spacing: Layout.isTV ? 40 : 16) {
                     ForEach(model.carouselChannels) { channel in
                         Button {
-                            playingChannel = channel
+                            open(channel)
                         } label: {
                             ChannelCard(
                                 channel: channel,
@@ -281,7 +303,7 @@ struct HomeView: View {
                     channels: model.guideChannels,
                     guide: model.guide,
                     logoURLFor: model.catalog.logoURL(for:),
-                    onLogoTap: { playingChannel = $0 },
+                    onLogoTap: { open($0) },
                     onProgramTap: { programDetail = $0 },
                     palette: model.logoPalette,
                     maxRows: guideRowBudget

@@ -20,7 +20,7 @@ open SooshViewer.xcodeproj
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-iOS \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcodebuild test -project SooshViewer.xcodeproj -scheme Soosh-iOS \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 64 tests
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'      # 71 tests
 xcodebuild -project SooshViewer.xcodeproj -scheme Soosh-tvOS \
   -destination 'generic/platform=tvOS Simulator' build
 ```
@@ -47,13 +47,14 @@ Sources/Playback/     PlaybackEngine protocol, AVPlayerEngine.
                       TransportStream/ rewraps live MPEG-TS as local HLS.
 Sources/Presentation/ Colour maths, logo palette, platform styles, backdrop.
 Sources/Features/     One folder per screen: view + its @Observable model.
+                      Multiview/ is the tile grid, owned by RootView.
                       Category/ takes HomeModel rather than owning one — a
                       second model is a second full fetch of the lineup.
 Sources/App/          Entry point, RootView, the two sidebar shells.
                       SidebarDestination is shared; the chrome is not.
-Tests/                64 tests: connect loop, logo palette, HLS
+Tests/                71 tests: connect loop, logo palette, HLS
                       server, catalog cache, live-edge policy,
-                      live-window timing, playable window.
+                      live-window timing, playable window, multiview.
 ```
 
 ---
@@ -111,6 +112,45 @@ Four decisions worth not re-litigating:
   catalog is revalidated every launch anyway; a stale lineup beats an empty
   screen while offline, and a failed refresh keeps cached content on screen
   (`refreshError`) rather than replacing it with `.failed`.
+
+---
+
+## Multiview
+
+The "plus screen" control tiles the current channel and drops you back into the
+app; tapping any channel after that adds it to the grid instead of opening it
+full screen.
+
+**`MultiviewModel` is owned by `RootView`, above the navigation stack**, and
+that placement is the design rather than a convenience. A tile has to keep
+playing while you browse home, open a category and pick the next channel, so the
+players cannot belong to any screen you can navigate away from — `PlayerView`
+creates and destroys a `PlayerModel` in its `.task`, and these outlive every
+view.
+
+Three constraints shape it, and none of them are layout:
+
+- **A tile is a whole pipeline** — an upstream connection, a rewrap session with
+  its own loopback server and ~19MB window, and an `AVPlayer` decoding HD. Four
+  tiles is four of everything.
+- **`maxTiles` guards the provider's connection limit**, not the screen. It is
+  the same limit that answers "All active M3U profiles have reached maximum
+  connection limits", and exhausting it locks you out of your own service. A tap
+  at the cap is refused rather than evicting a tile.
+- **Exactly one tile is audible.** Four mixed audio tracks are unintelligible,
+  so `setMuted` silences the rest; tapping a tile is what moves the sound.
+
+Tapping a channel that is already tiled focuses it rather than opening a second
+connection to the same stream.
+
+**Every channel tap routes through one `open(_:)` per screen.** Multiview
+changes what a tap *means*, and it has to change everywhere at once — carousel
+card, guide block, search result — or the feature works on some rows and not
+others.
+
+Not built yet: expanding a tile back to full screen, moving or resizing tiles,
+per-tile transport controls, and tvOS — the overlay is tap-driven with no focus
+model, so on a remote the tiles would be unreachable.
 
 ---
 
