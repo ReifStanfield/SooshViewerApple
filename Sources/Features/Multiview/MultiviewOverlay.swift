@@ -18,25 +18,35 @@ struct MultiviewOverlay: View {
         if multiview.isActive {
             VStack(alignment: .trailing, spacing: 10) {
                 Spacer()
-                // Two columns, filling top-to-bottom, anchored bottom-trailing.
-                // A single row would run off a phone; a free-floating grid would
-                // need drag state the feature does not have yet.
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.fixed(tileWidth), spacing: 10),
-                        count: multiview.tiles.count > 1 ? 2 : 1
-                    ),
-                    spacing: 10
-                ) {
-                    ForEach(multiview.tiles) { tile in
-                        MultiviewTileView(
-                            tile: tile,
-                            isAudible: tile.id == multiview.audibleTileID,
-                            onFocus: { multiview.makeAudible(tile.id) },
-                            onClose: { multiview.remove(tile.id) }
-                        )
-                        .frame(width: tileWidth, height: tileWidth * 9 / 16)
+                // **Wrapped in an HStack with a leading Spacer.** A `LazyVGrid`
+                // expands to whatever width it is offered and centres its
+                // columns inside it, so on its own the tiles sat in the middle
+                // of the screen however the stack was aligned. The Spacer is
+                // what actually pushes them into the corner.
+                //
+                // Two columns, filling top-to-bottom: a single row would run off
+                // a phone, and a free-floating grid would need drag state the
+                // feature does not have yet.
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.fixed(tileWidth), spacing: 10),
+                            count: multiview.tiles.count > 1 ? 2 : 1
+                        ),
+                        spacing: 10
+                    ) {
+                        ForEach(multiview.tiles) { tile in
+                            MultiviewTileView(
+                                tile: tile,
+                                isAudible: tile.id == multiview.audibleTileID,
+                                onFocus: { multiview.makeAudible(tile.id) },
+                                onClose: { multiview.remove(tile.id) }
+                            )
+                            .frame(width: tileWidth, height: tileWidth * 9 / 16)
+                        }
                     }
+                    .fixedSize()
                 }
                 closeAllButton
             }
@@ -76,7 +86,16 @@ private struct MultiviewTileView: View {
             Color.black
 
             if let engine = tile.model.avEngine {
-                VideoLayerView(player: engine.player)
+                VideoLayerView(player: engine.player) { layer in
+                    // The tile's layer is what PiP is raised *from*, so the
+                    // engine has to own it exactly as the full player's does.
+                    engine.adoptVideoLayer(layer)
+                    if tile.wantsPictureInPicture {
+                        #if !os(tvOS)
+                            engine.startPictureInPicture()
+                        #endif
+                    }
+                }
             }
 
             // Tiles are small, so connection state has to be legible at a

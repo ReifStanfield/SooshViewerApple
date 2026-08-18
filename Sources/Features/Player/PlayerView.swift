@@ -241,7 +241,8 @@ struct PlayerView: View {
                             channel: channel,
                             streamURL: streamURL,
                             programs: programs,
-                            logoURL: logoURL
+                            logoURL: logoURL,
+                            pictureInPicture: true
                         )
                         dismiss()
                     }

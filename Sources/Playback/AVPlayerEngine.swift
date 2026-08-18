@@ -945,6 +945,31 @@ final class AVPlayerEngine: PlaybackEngine {
             pipController = AVPictureInPictureController(playerLayer: layer)
         }
 
+        /// Starts PiP as soon as the system will allow it.
+        ///
+        /// **`isPictureInPicturePossible` is false until the layer has a
+        /// picture**, which on a rewrapped live stream is ~3s after the item
+        /// starts. Calling `startPictureInPicture()` before then is silently
+        /// ignored — no error, no window — so this waits for the flag rather
+        /// than firing once and hoping.
+        func startPictureInPicture() {
+            guard let pipController, !pipController.isPictureInPictureActive else { return }
+            pipStartTask?.cancel()
+            pipStartTask = Task { @MainActor [weak self] in
+                for _ in 0 ..< 60 {
+                    guard !Task.isCancelled, let self, let controller = self.pipController else { return }
+                    if controller.isPictureInPicturePossible {
+                        controller.startPictureInPicture()
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                Self.log.error("picture in picture never became possible")
+            }
+        }
+
+        @ObservationIgnored private var pipStartTask: Task<Void, Never>?
+
         func togglePictureInPicture() {
             guard let pipController else { return }
             if pipController.isPictureInPictureActive {

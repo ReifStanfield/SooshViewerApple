@@ -24,6 +24,14 @@ final class MultiviewModel {
         let channel: Channel
         let logoURL: URL?
         let model: PlayerModel
+
+        /// Whether this tile should be raised into the system PiP window once
+        /// its layer has a picture.
+        ///
+        /// **Only one tile can ever have this.** Picture in Picture is a system
+        /// singleton — one window per device, not one per player — so it belongs
+        /// to the stream you popped out, and any others stay as in-app tiles.
+        var wantsPictureInPicture = false
     }
 
     private(set) var tiles: [Tile] = []
@@ -74,7 +82,8 @@ final class MultiviewModel {
         channel: Channel,
         streamURL: URL?,
         programs: [Program],
-        logoURL: URL?
+        logoURL: URL?,
+        pictureInPicture: Bool = false
     ) -> Tile? {
         // Tapping a channel that is already tiled should move your attention to
         // it, not start a second connection to the same stream.
@@ -89,7 +98,10 @@ final class MultiviewModel {
             streamURL: streamURL,
             programs: programs
         )
-        let tile = Tile(channel: channel, logoURL: logoURL, model: player)
+        var tile = Tile(channel: channel, logoURL: logoURL, model: player)
+        // Refused rather than fought over: a second request would tear the
+        // first stream out of the PiP window it is already in.
+        tile.wantsPictureInPicture = pictureInPicture && !tiles.contains(where: \.wantsPictureInPicture)
         tiles.append(tile)
 
         player.startTicking()
