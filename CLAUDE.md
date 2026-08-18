@@ -480,6 +480,11 @@ from screenshots got wrong.
 
 The TV build forks the *chrome*, not the data or the player logic.
 
+- **Home is Continue Watching and the guide, with no Categories grid.** The grid
+  is a browsing aid for a pointer; on a remote it is a wall of focus targets
+  between the carousel and the guide that every trip down the page pays for, and
+  the sidebar already carries the same navigation.
+
 - **`.buttonStyle(.plain)` removes the focus effect on tvOS** — a focused card
   looks identical to an unfocused one and the remote appears dead. Use the
   helpers in `PlatformStyle.swift`: `cardButtonStyle()` (a lift),
@@ -561,7 +566,7 @@ the iOS header.
   `/proxy/ts/stream/` returns "All active M3U profiles have reached maximum
   connection limits" after a handful of rapid launches, and needs a minute or two
   to drain. Batch player changes rather than iterating one at a time.
-- **`Soosh-macOS` and the Catalyst variant now overlap.** The native AppKit
-  target exists because Catalyst was blocked three times; dropping FFmpeg
-  unblocked it, so one of the two is redundant. Left standing deliberately —
-  see the comment on the target in `project.yml`.
+- **The native `Soosh-macOS` target is gone**, in favour of Catalyst. It only
+  existed because Catalyst was blocked three times; dropping FFmpeg unblocked
+  it, and keeping both meant two Mac apps and a set of `#if os(macOS)` branches
+  that Catalyst never compiles — Catalyst is `os(iOS)`.

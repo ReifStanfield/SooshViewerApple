@@ -86,23 +86,19 @@ final class AVPlayerEngine: PlaybackEngine {
     /// session. Configure the session when you are about to use it, not when you
     /// are merely allocated.
     ///
-    /// **macOS has no `AVAudioSession` at all** — it is not deprecated there,
-    /// the class is unavailable. Nothing is lost by skipping it: the session
-    /// exists to negotiate with a ring/silent switch and with backgrounding
-    /// rules, and a Mac has neither. Core Audio routes the output without being
-    /// asked.
+    /// This ran under `#if !os(macOS)` for the native Mac target, where
+    /// `AVAudioSession` is unavailable rather than merely deprecated. That
+    /// target is gone; Catalyst compiles as iOS and does have the class.
     private func configureAudioSession() {
-        #if !os(macOS)
-            guard !audioSessionReady else { return }
-            audioSessionReady = true
-            do {
-                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-                try AVAudioSession.sharedInstance().setActive(true)
-            } catch {
-                // Not fatal — video still plays, audio routing is just less correct.
-                print("AVAudioSession setup failed: \(error)")
-            }
-        #endif
+        guard !audioSessionReady else { return }
+        audioSessionReady = true
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            // Not fatal — video still plays, audio routing is just less correct.
+            print("AVAudioSession setup failed: \(error)")
+        }
     }
 
     /// The layer the picture is drawn into.

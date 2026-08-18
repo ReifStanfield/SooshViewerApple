@@ -102,75 +102,12 @@ struct PlayerView: View {
                     engine.playOrPause()
                     model.pokeControls()
                 }
-        #elseif os(iOS)
-            iOSPlayer(model: model, engine: engine)
         #else
-            // **macOS shares the live path's thin chrome rather than
-            // `PlayerControlsView`.** That file is `#if os(iOS)` end to end, and
-            // not incidentally: its transport rail is built for a thumb, and
-            // `toggleFullScreen` drives `UIWindowScene.requestGeometryUpdate`,
-            // which has no AppKit counterpart — a Mac window is resized by the
-            // user, not by the app asking. Porting it is a real piece of design
-            // work, not a `#if`, so the Mac gets the honest subset for now:
-            // picture, connection state, a way out, play/pause.
-            macPlayer(model: model, engine: engine)
+            // Mac Catalyst compiles as iOS and takes this path too — the native
+            // Mac target that used to need its own thinner chrome is gone.
+            iOSPlayer(model: model, engine: engine)
         #endif
     }
-
-    #if os(macOS)
-
-        /// The player layout on macOS — which now means both the Catalyst
-        /// variant and the native Mac target.
-        private func macPlayer(model: PlayerModel, engine: AVPlayerEngine) -> some View {
-            VideoLayerView(player: engine.player) { layer in
-                engine.adoptVideoLayer(layer)
-            }
-            .ignoresSafeArea()
-            .overlay { connectionOverlay(model) }
-            .overlay(alignment: .topLeading) {
-                if model.controlsVisible { macBackButton() }
-            }
-            .overlay {
-                if model.controlsVisible, model.state == .playing {
-                    macPlayPauseButton(isPlaying: engine.isPlaying) {
-                        engine.playOrPause()
-                        model.pokeControls()
-                    }
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { model.toggleControls() }
-        }
-
-        @ViewBuilder
-        private func macBackButton() -> some View {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 52, height: 52)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: Circle())
-            .padding(20)
-            .accessibilityLabel("Back")
-        }
-
-        @ViewBuilder
-        private func macPlayPauseButton(isPlaying: Bool, action: @escaping () -> Void) -> some View {
-            Button(action: action) {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.white)
-                    .frame(width: 96, height: 96)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: Circle())
-        }
-
-    #endif
 
     // Shared by both engine paths: the FFmpeg player has no controls
     // view of its own, so it reuses this connection state directly.

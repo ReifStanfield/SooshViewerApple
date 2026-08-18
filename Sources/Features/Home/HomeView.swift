@@ -205,7 +205,15 @@ struct HomeView: View {
                     SearchResultsView(model: model) { open($0) }
                 } else {
                     continueWatching
-                    categoriesGrid
+                    // **No categories on tvOS.** The grid is a browsing aid for
+                    // a pointer, and on a remote it is a wall of focus targets
+                    // between the carousel and the guide — every trip down the
+                    // page pays for it. The sidebar already carries the same
+                    // navigation, so on TV the home page is what is on now and
+                    // what is on next.
+                    #if !os(tvOS)
+                        categoriesGrid
+                    #endif
                     guideGrid
                 }
             }

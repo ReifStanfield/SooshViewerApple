@@ -154,61 +154,6 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "26.0"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
 
-  # A **native AppKit Mac app**, kept alongside the Catalyst variant.
-  #
-  # This target exists because Catalyst was blocked three times, once per FFmpeg
-  # engine, and a native Mac app was the only route left to a Mac window. That
-  # is no longer true — the ledger on `SUPPORTS_MACCATALYST` above explains why
-  # Catalyst now builds — so **the two overlap, and one of them is redundant.**
-  # Deliberately left standing rather than deleted in the same change that
-  # turned Catalyst on: it compiles the same `Sources/` tree and costs nothing
-  # to keep until the Catalyst build has been exercised on real hardware.
-  #
-  # `deploymentTarget` is set per-target here rather than in `options` at the top
-  # of the file, which only declares iOS and tvOS. macOS 26 for the same reason
-  # as the others: Liquid Glass unconditionally.
-  Soosh-macOS:
-    templates: [App]
-    platform: macOS
-    deploymentTarget: "26.0"
-    info:
-      path: Generated/Info-macOS.plist
-      properties:
-        CFBundleDisplayName: Soosh
-        # The live path now serves HLS from 127.0.0.1 over plain HTTP, and App
-        # Transport Security blocks cleartext by default. `NSAllowsLocalNetworking`
-        # is the documented exemption for loopback and local-network loads; it
-        # relaxes nothing about the Dispatcharr connection itself, which stays
-        # HTTPS and stays subject to ATS.
-        NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
-        # Required because the rewrap's HLS server accepts connections from the
-        # local network, which is what lets an AirPlay receiver fetch the
-        # playlist. Without a stated purpose the OS can refuse the access with
-        # no error the app can see.
-        NSLocalNetworkUsageDescription: >-
-          Soosh streams live TV to AirPlay devices on your network by serving
-          the video from this device.
-        # A real Mac app, not a menu-bar accessory.
-        LSApplicationCategoryType: public.app-category.entertainment
-        DISPATCHARR_URL: $(DISPATCHARR_URL)
-        DISPATCHARR_USER: $(DISPATCHARR_USER)
-        DISPATCHARR_PASS: $(DISPATCHARR_PASS)
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.soosh.viewer.mac
-        # **The App Sandbox is deliberately off.**
-        #
-        # Turning it on needs `com.apple.security.network.client` or every
-        # Dispatcharr request fails with a connection error that looks like a
-        # server problem rather than an entitlement. It is one entitlements file
-        # away and belongs with a real signing story — see the credentials note
-        # in CLAUDE.md — rather than being switched on untested here.
-        ENABLE_APP_SANDBOX: NO
-        ENABLE_HARDENED_RUNTIME: YES
-
-  # Tests run on iOS only. The connect loop under test is platform-independent,
-  # and a second test target would just double the run time.
   SooshTests:
     type: bundle.unit-test
     platform: iOS

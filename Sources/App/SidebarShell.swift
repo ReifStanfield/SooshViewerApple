@@ -103,7 +103,22 @@ import SwiftUI
             }
             .animation(.snappy(duration: 0.28), value: isOpen)
             .animation(.snappy(duration: 0.28), value: playlistExpanded)
-            .appBackground()
+            // **A flat fill, not `appBackground()`.**
+            //
+            // The shell used to draw the full backdrop here, which meant the
+            // animated shader ran twice: once here and once inside `HomeView`.
+            // Only the inner one is ever seen — a `NavigationStack` paints the
+            // opaque system background over whatever is behind it, which is why
+            // the backdrop has to be applied to the stack's *content* in the
+            // first place. Verified by deleting the inner one and watching the
+            // whole page go flat.
+            //
+            // Something still has to sit behind the panel: it is glass, so it
+            // refracts what is under it, and the 8pt gutters around it are not
+            // covered by the content once it slides. That is what this is — the
+            // backdrop's own edge colour, so the gutters match the darkest part
+            // of the page rather than showing the window through them.
+            .background(AppBackground.edge.color.ignoresSafeArea())
         }
 
         /// An invisible strip down the leading edge that opens the panel when

@@ -243,7 +243,7 @@ private struct MultiviewTileView: View {
 
     /// Whether the controls are showing.
     private var showsChrome: Bool {
-        #if targetEnvironment(macCatalyst) || os(macOS)
+        #if targetEnvironment(macCatalyst)
             isHovering
         #else
             true

@@ -11,91 +11,43 @@ import SwiftUI
 // A bare `AVPlayerLayer` also hands us the object `AVPictureInPictureController`
 // needs, which `AVPlayerViewController` never exposes.
 //
-// UIKit and AppKit reach the same layer from opposite directions, which is why
-// this is forked rather than shimmed: UIKit hands you a backing layer and lets
-// you *substitute the class*, AppKit makes you opt into a backing layer and then
-// *supply the instance*.
+// There was an AppKit fork here for the native Mac target. That target is gone
+// in favour of Mac Catalyst, which compiles as iOS and so takes this path.
 
-#if os(macOS)
+/// A `UIView` whose backing layer *is* an `AVPlayerLayer`.
+///
+/// Overriding `layerClass` rather than adding a sublayer is the standard
+/// trick: the layer then resizes with the view automatically, so there is no
+/// `layoutSubviews` bookkeeping and no frame drift during rotation.
+final class PlayerLayerUIView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
 
-    /// An `NSView` whose backing layer *is* an `AVPlayerLayer`.
-    ///
-    /// AppKit has no `layerClass`. `makeBackingLayer()` is its equivalent, and
-    /// it only gets called when `wantsLayer` is set — so the two go together.
-    /// With both, the layer resizes with the view and there is no frame
-    /// bookkeeping, exactly as on iOS.
-    final class PlayerLayerNSView: NSView {
-        override func makeBackingLayer() -> CALayer { AVPlayerLayer() }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
 
-        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+struct VideoLayerView: UIViewRepresentable {
+    let player: AVPlayer
 
-        init() {
-            super.init(frame: .zero)
-            wantsLayer = true
-        }
+    /// Called once, with the layer, so the engine can attach PiP to it.
+    var onLayerReady: (AVPlayerLayer) -> Void = { _ in }
 
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func makeUIView(context: Context) -> PlayerLayerUIView {
+        let view = PlayerLayerUIView()
+        view.backgroundColor = .black
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        onLayerReady(view.playerLayer)
+        return view
     }
 
-    struct VideoLayerView: NSViewRepresentable {
-        let player: AVPlayer
-
-        /// Called once, with the layer, so the engine can attach PiP to it.
-        var onLayerReady: (AVPlayerLayer) -> Void = { _ in }
-
-        func makeNSView(context: Context) -> PlayerLayerNSView {
-            let view = PlayerLayerNSView()
+    func updateUIView(_ view: PlayerLayerUIView, context: Context) {
+        if view.playerLayer.player !== player {
             view.playerLayer.player = player
-            view.playerLayer.videoGravity = .resizeAspect
-            view.playerLayer.backgroundColor = NSColor.black.cgColor
-            onLayerReady(view.playerLayer)
-            return view
-        }
-
-        func updateNSView(_ view: PlayerLayerNSView, context: Context) {
-            if view.playerLayer.player !== player {
-                view.playerLayer.player = player
-            }
         }
     }
+}
 
-#else
 
-    /// A `UIView` whose backing layer *is* an `AVPlayerLayer`.
-    ///
-    /// Overriding `layerClass` rather than adding a sublayer is the standard
-    /// trick: the layer then resizes with the view automatically, so there is no
-    /// `layoutSubviews` bookkeeping and no frame drift during rotation.
-    final class PlayerLayerUIView: UIView {
-        override class var layerClass: AnyClass { AVPlayerLayer.self }
-
-        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-    }
-
-    struct VideoLayerView: UIViewRepresentable {
-        let player: AVPlayer
-
-        /// Called once, with the layer, so the engine can attach PiP to it.
-        var onLayerReady: (AVPlayerLayer) -> Void = { _ in }
-
-        func makeUIView(context: Context) -> PlayerLayerUIView {
-            let view = PlayerLayerUIView()
-            view.backgroundColor = .black
-            view.playerLayer.player = player
-            view.playerLayer.videoGravity = .resizeAspect
-            onLayerReady(view.playerLayer)
-            return view
-        }
-
-        func updateUIView(_ view: PlayerLayerUIView, context: Context) {
-            if view.playerLayer.player !== player {
-                view.playerLayer.player = player
-            }
-        }
-    }
-
-#endif
 
 // The live path needs no representable of its own, and no longer needs a second
 // path at all: live TS is rewrapped as HLS and presented by the same

@@ -72,15 +72,12 @@ extension View {
     /// Wrapped rather than `#if`-ed at each call site, for the same reason as
     /// `inlineNavigationTitle`: the platform difference is a fact about the
     /// modifier, not about the fields that want plain text.
-    /// `textInputAutocapitalization` is software-keyboard behaviour and does not
-    /// exist on macOS, where a hardware keyboard types exactly what was pressed.
+    /// The `#if os(macOS)` arm here was for the native Mac target, which had no
+    /// software keyboard to autocapitalise. Catalyst compiles as iOS and takes
+    /// the modifier without complaint.
     func plainTextEntry() -> some View {
-        #if os(macOS)
-            autocorrectionDisabled()
-        #else
-            autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-        #endif
+        autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
     }
 }
 
