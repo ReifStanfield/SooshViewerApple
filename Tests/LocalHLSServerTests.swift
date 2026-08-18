@@ -209,7 +209,7 @@ struct PlayableWindowTests {
         let server = LocalHLSServer(preferLocalNetworkAddress: false)
         for index in 0 ..< 2 { await server.publish(makeSegment(index: index, duration: 2.5)) }
         // 5s of window against a 3s target: a client starting 9s back has
-        // nowhere to go. This is the case that stalled the join.
+        // nowhere to go at all. This is the case that stalled the join.
         #expect(await server.hasPlayableWindow == false)
     }
 
@@ -218,6 +218,11 @@ struct PlayableWindowTests {
         let server = LocalHLSServer(preferLocalNetworkAddress: false)
         var index = 0
         // 2.5s segments -> target 3 -> needs 9s + 2.5s headroom = 11.5s.
+        //
+        // Raising this headroom to three segments was tried, to give the player
+        // slack behind its start point. It changed the measured time to first
+        // frame by 0.0005s — nothing — so it was reverted rather than kept for
+        // the join latency it cost.
         while await !server.hasPlayableWindow {
             await server.publish(makeSegment(index: index, duration: 2.5))
             index += 1

@@ -95,6 +95,68 @@ final class AVPlayerEngine: PlaybackEngine {
         #endif
     }
 
+    /// The layer the picture is drawn into.
+    ///
+    /// Weak: the view owns it, and an engine outliving a torn-down view must not
+    /// keep it alive. Held at all because two things need it — Picture in
+    /// Picture, and the reattach after an external route ends.
+    @ObservationIgnored private weak var videoLayer: AVPlayerLayer?
+
+    /// When the current item was handed to the player, for measuring how long
+    /// the first frame takes to appear.
+    @ObservationIgnored private var itemStartedAt: ContinuousClock.Instant?
+
+    /// Takes the layer the video is drawn into.
+    ///
+    /// Replaces the old PiP-only hook: the layer matters beyond PiP now, and
+    /// tvOS — which has no PiP — still wants the reattach behaviour.
+    func adoptVideoLayer(_ layer: AVPlayerLayer) {
+        videoLayer = layer
+        observeFirstFrame(on: layer)
+        #if !os(tvOS)
+            attachPictureInPicture(to: layer)
+        #endif
+    }
+
+    /// Times the gap between playback starting and the layer having a picture.
+    ///
+    /// **`isReadyForDisplay` is the only honest signal for "there is a frame on
+    /// screen".** `presentationSize` becoming non-zero only means the *stream*
+    /// declared a size, which happens well before anything is drawn — which is
+    /// why audio can be running over a frozen or black picture and every other
+    /// indicator still looks healthy.
+    private func observeFirstFrame(on layer: AVPlayerLayer) {
+        layerObservation?.invalidate()
+        // `.initial` as well as `.new`: a layer that is already showing a
+        // picture when it is adopted never *changes*, and would report nothing.
+        layerObservation = layer.observe(\.isReadyForDisplay, options: [.new, .initial]) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            Task { @MainActor [weak self] in
+                guard let self, let itemStartedAt else { return }
+                let elapsed = ContinuousClock.now - itemStartedAt
+                Self.log.notice("first frame on screen after \(elapsed.description, privacy: .public)")
+                self.itemStartedAt = nil
+            }
+        }
+    }
+
+    @ObservationIgnored private var layerObservation: NSKeyValueObservation?
+
+    /// Re-points the layer at the player after an external route ends.
+    ///
+    /// **AirPlay leaves the local layer without a picture.** While the route is
+    /// external the layer has nothing to draw, and when playback comes back it
+    /// is not reliably re-attached — the symptom is a black or frozen frame that
+    /// clears only when something else disturbs the layer. Setting `player`
+    /// again is what forces it to re-acquire, and it is cheap enough to do
+    /// unconditionally on the transition.
+    private func reattachVideoLayer() {
+        guard let videoLayer else { return }
+        Self.log.notice("external route ended, reattaching the video layer")
+        videoLayer.player = nil
+        videoLayer.player = player
+    }
+
     /// The live rewrap, when this stream is a raw transport stream.
     ///
     /// Held so it can be torn down with the item — it owns the upstream socket,
@@ -353,7 +415,14 @@ final class AVPlayerEngine: PlaybackEngine {
                 let playing = player.timeControlStatus == .playing
                 Task { @MainActor [weak self] in self?.isPlaying = playing }
             },
+            player.observe(\.isExternalPlaybackActive, options: [.new, .old]) { [weak self] player, change in
+                // Only the *end* of an external route needs handling; the start
+                // is AVFoundation handing the stream off, which it does cleanly.
+                guard change.oldValue == true, !player.isExternalPlaybackActive else { return }
+                Task { @MainActor [weak self] in self?.reattachVideoLayer() }
+            },
         ]
+        itemStartedAt = .now
 
         // **Live-edge recovery**, only on the rewrapped path.
         //
@@ -637,6 +706,11 @@ final class AVPlayerEngine: PlaybackEngine {
 
         observations.forEach { $0.invalidate() }
         observations.removeAll()
+        // **`layerObservation` is deliberately not torn down here.** It belongs
+        // to the layer, which outlives any one item, and `stop()` runs at the
+        // start of every `open()` — invalidating it here meant it survived
+        // exactly one channel and then silently never fired again.
+
         failureObserver = nil
 
         lastError = nil

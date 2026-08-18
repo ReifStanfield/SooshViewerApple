@@ -116,7 +116,7 @@ struct PlayerView: View {
         /// variant and the native Mac target.
         private func macPlayer(model: PlayerModel, engine: AVPlayerEngine) -> some View {
             VideoLayerView(player: engine.player) { layer in
-                engine.attachPictureInPicture(to: layer)
+                engine.adoptVideoLayer(layer)
             }
             .ignoresSafeArea()
             .overlay { connectionOverlay(model) }
@@ -213,7 +213,7 @@ struct PlayerView: View {
                 Color.black.ignoresSafeArea()
 
                 VideoLayerView(player: engine.player) { layer in
-                    engine.attachPictureInPicture(to: layer)
+                    engine.adoptVideoLayer(layer)
                 }
                 .ignoresSafeArea()
                 // A plain layer has no gestures of its own, so the show/hide tap

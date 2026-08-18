@@ -210,6 +210,16 @@ no decoder.
   play/pause *after* a couple of AirPlay sessions. A paused live stream falls
   behind by design, and the seek completion used to `play()` unconditionally,
   restarting playback the viewer had stopped.
+- **`AVPlayerLayer.isReadyForDisplay` is the only honest "there is a picture"
+  signal.** `presentationSize` going non-zero only means the *stream* declared a
+  size, which happens well before anything is drawn — so audio can be running
+  over a frozen or black frame while every other indicator looks healthy.
+  Measured on Catalyst: first frame **3.15s** after the item starts, twice,
+  to four decimal places.
+- **An ended AirPlay route leaves the local layer without a picture.** The layer
+  is not reliably re-acquired, so the fix is to set `layer.player` again on the
+  transition. `AVPlayerEngine.adoptVideoLayer` exists to hold the layer for this
+  and for PiP.
 - **A player whose position does not move is wedged, not lagging, and seeking
   will never fix it.** Caught from the catch-up log: the window slid from
   `96.25…107.73` to `135.15…146.64` while `currentTime()` stayed pinned at
@@ -323,6 +333,7 @@ by deleting the suspect:**
 | Spinner forever, no error anywhere | Forward buffer capped below one segment |
 | Rapid play/pause after AirPlaying | Catch-up seeking against the receiver's timebase |
 | Repeated jumps, position never moves | Player wedged, not lagging — seeking cannot fix it |
+| Black frame after AirPlay returns | Layer never re-acquired the player |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning
