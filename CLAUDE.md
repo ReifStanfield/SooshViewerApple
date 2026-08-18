@@ -121,6 +121,21 @@ The "plus screen" control tiles the current channel and drops you back into the
 app; tapping any channel after that adds it to the grid instead of opening it
 full screen.
 
+**Tiles are in-app floating windows, not system Picture in Picture.** PiP was
+tried and reverted: it is a system singleton — one window per device, not one
+per player — so it can host the stream you popped out and nothing else, which
+makes it useless as the mechanism for a grid. The tiles are styled to read as
+floating windows instead (rounded, shadowed, chrome on hover where there is a
+pointer), and `AVPlayerEngine` keeps its PiP support for the player's own PiP
+control.
+
+**The pop-out hands its running player to the grid rather than building a new
+one.** Constructing a fresh `PlayerModel` for the channel already on screen
+opens a second upstream connection to the same stream and waits out another
+join — measured before the fix as two connections and two joins for one
+channel. `MultiviewModel.adopt` takes ownership, and `PlayerView.handedOff`
+stops `onDisappear` from tearing down the model the tile is now playing.
+
 **`MultiviewModel` is owned by `RootView`, above the navigation stack**, and
 that placement is the design rather than a convenience. A tile has to keep
 playing while you browse home, open a category and pick the next channel, so the
@@ -150,7 +165,8 @@ others.
 
 Not built yet: expanding a tile back to full screen, moving or resizing tiles,
 per-tile transport controls, and tvOS — the overlay is tap-driven with no focus
-model, so on a remote the tiles would be unreachable.
+model, so on a remote the tiles would be unreachable (`onHover` is not merely
+unused there, it is unavailable).
 
 ---
 

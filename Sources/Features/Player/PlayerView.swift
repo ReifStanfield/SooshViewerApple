@@ -15,6 +15,9 @@ import SwiftUI
 struct PlayerView: View {
     @State private var model: PlayerModel?
 
+    /// Whether this view's player now belongs to the multiview grid.
+    @State private var handedOff = false
+
     private let channel: Channel
     private let streamURL: URL?
     private let programs: [Program]
@@ -59,6 +62,10 @@ struct PlayerView: View {
             created.pokeControls()
         }
         .onDisappear {
+            // **Not torn down when it was handed to the grid.** The tile is
+            // playing this very model now; tearing it down here would stop the
+            // stream the pop-out was supposed to keep running.
+            guard !handedOff else { return }
             let leaving = model
             Task { await leaving?.teardown() }
         }
@@ -237,13 +244,11 @@ struct PlayerView: View {
                     // and the provider counts both. `onDisappear` already calls
                     // `teardown()`, so dismissing is the teardown.
                     onMultiview: {
-                        multiview.add(
-                            channel: channel,
-                            streamURL: streamURL,
-                            programs: programs,
-                            logoURL: logoURL,
-                            pictureInPicture: true
-                        )
+                        // **Hands this exact player to the grid — no second
+                        // connection, no second join.** Ownership moves with it,
+                        // which is why `handedOff` exists below.
+                        multiview.adopt(channel: channel, logoURL: logoURL, model: model)
+                        handedOff = true
                         dismiss()
                     }
                 )

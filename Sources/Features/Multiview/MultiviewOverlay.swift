@@ -74,12 +74,32 @@ struct MultiviewOverlay: View {
     }
 }
 
-/// One tile: the picture, who it is, and the two things you can do to it.
+/// One floating window: the picture, and the controls only when you want them.
+///
+/// **Styled as a window rather than a panel.** The reference is a clean rounded
+/// rectangle of video with a shadow under it — no title bar, no permanently
+/// visible buttons. Chrome that is always on screen turns four tiles into four
+/// competing headings, and on a small tile it covers the thing you are watching.
+///
+/// So the controls appear on hover where there is a pointer, and stay put where
+/// there is not: a touch screen has no hover, and hiding a close button behind a
+/// gesture nobody can perform would strand the tile.
 private struct MultiviewTileView: View {
     let tile: MultiviewModel.Tile
     let isAudible: Bool
     let onFocus: () -> Void
     let onClose: () -> Void
+
+    @State private var isHovering = false
+
+    /// Whether the controls are showing.
+    private var showsChrome: Bool {
+        #if targetEnvironment(macCatalyst) || os(macOS)
+            isHovering
+        #else
+            true
+        #endif
+    }
 
     var body: some View {
         ZStack {
@@ -87,19 +107,15 @@ private struct MultiviewTileView: View {
 
             if let engine = tile.model.avEngine {
                 VideoLayerView(player: engine.player) { layer in
-                    // The tile's layer is what PiP is raised *from*, so the
-                    // engine has to own it exactly as the full player's does.
+                    // The engine owns the tile's layer exactly as it owns the
+                    // full player's — the live-edge watch and the AirPlay
+                    // reattach both need it.
                     engine.adoptVideoLayer(layer)
-                    if tile.wantsPictureInPicture {
-                        #if !os(tvOS)
-                            engine.startPictureInPicture()
-                        #endif
-                    }
                 }
             }
 
-            // Tiles are small, so connection state has to be legible at a
-            // glance rather than spelled out the way the full player does it.
+            // Tiles are small, so connection state has to read at a glance
+            // rather than be spelled out the way the full player does it.
             switch tile.model.state {
             case .idle, .connecting:
                 ProgressView().tint(.white)
@@ -111,49 +127,65 @@ private struct MultiviewTileView: View {
                 EmptyView()
             }
 
-            VStack {
-                HStack {
-                    // The audible tile is the one being listened to, so it says
-                    // so — otherwise the only way to tell is to listen.
-                    Image(systemName: isAudible ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(isAudible ? 0.95 : 0.5))
-                    Spacer()
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
-                            .background(.black.opacity(0.55), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close \(tile.channel.displayName)")
-                }
-                Spacer()
-                HStack {
-                    Text(tile.channel.displayName)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Spacer()
-                }
-            }
-            .padding(6)
-            .background(
-                LinearGradient(
-                    colors: [.black.opacity(0.55), .clear, .black.opacity(0.55)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            if showsChrome { chrome }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isAudible ? Color.accentColor : .white.opacity(0.15), lineWidth: isAudible ? 2 : 1)
+            // The audible tile is ringed, because otherwise the only way to know
+            // which one you are hearing is to listen to all of them.
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    isAudible ? Color.accentColor : .white.opacity(0.12),
+                    lineWidth: isAudible ? 2 : 1
+                )
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        // The shadow is what makes it read as floating *over* the app rather
+        // than as a panel cut into it.
+        .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onTapGesture(perform: onFocus)
-        .shadow(radius: 8)
+        // Not merely unused on tvOS — `onHover` is unavailable there, since a
+        // remote has no pointer to hover with.
+        #if !os(tvOS)
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.15), value: isHovering)
+        #endif
+    }
+
+    private var chrome: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: isAudible ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(isAudible ? 0.95 : 0.55))
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(.black.opacity(0.55), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close \(tile.channel.displayName)")
+            }
+            Spacer()
+            HStack {
+                Text(tile.channel.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer()
+            }
+        }
+        .padding(8)
+        .background(
+            LinearGradient(
+                colors: [.black.opacity(0.6), .clear, .black.opacity(0.6)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .transition(.opacity)
     }
 }

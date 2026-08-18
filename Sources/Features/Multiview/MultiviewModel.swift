@@ -24,14 +24,6 @@ final class MultiviewModel {
         let channel: Channel
         let logoURL: URL?
         let model: PlayerModel
-
-        /// Whether this tile should be raised into the system PiP window once
-        /// its layer has a picture.
-        ///
-        /// **Only one tile can ever have this.** Picture in Picture is a system
-        /// singleton — one window per device, not one per player — so it belongs
-        /// to the stream you popped out, and any others stay as in-app tiles.
-        var wantsPictureInPicture = false
     }
 
     private(set) var tiles: [Tile] = []
@@ -82,8 +74,7 @@ final class MultiviewModel {
         channel: Channel,
         streamURL: URL?,
         programs: [Program],
-        logoURL: URL?,
-        pictureInPicture: Bool = false
+        logoURL: URL?
     ) -> Tile? {
         // Tapping a channel that is already tiled should move your attention to
         // it, not start a second connection to the same stream.
@@ -98,16 +89,35 @@ final class MultiviewModel {
             streamURL: streamURL,
             programs: programs
         )
-        var tile = Tile(channel: channel, logoURL: logoURL, model: player)
-        // Refused rather than fought over: a second request would tear the
-        // first stream out of the PiP window it is already in.
-        tile.wantsPictureInPicture = pictureInPicture && !tiles.contains(where: \.wantsPictureInPicture)
+        let tile = Tile(channel: channel, logoURL: logoURL, model: player)
         tiles.append(tile)
 
         player.startTicking()
         player.connect()
 
         // The newest tile takes the sound: you just asked for it.
+        makeAudible(tile.id)
+        return tile
+    }
+
+    /// Tiles a player that is **already running**, taking ownership of it.
+    ///
+    /// **This is what the pop-out control uses, and the distinction is not
+    /// cosmetic.** Building a fresh `PlayerModel` for the channel you are
+    /// already watching opens a second upstream connection to the same stream
+    /// and waits out another join — the provider counts both, and for a few
+    /// seconds one channel occupies two of a small number of slots. Handing the
+    /// running player over costs nothing and the picture never stops.
+    ///
+    /// The caller must not tear this model down afterwards: ownership moved.
+    @discardableResult
+    func adopt(channel: Channel, logoURL: URL?, model: PlayerModel) -> Tile {
+        if let existing = tiles.first(where: { $0.channel.id == channel.id }) {
+            makeAudible(existing.id)
+            return existing
+        }
+        let tile = Tile(channel: channel, logoURL: logoURL, model: model)
+        tiles.append(tile)
         makeAudible(tile.id)
         return tile
     }
