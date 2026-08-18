@@ -177,8 +177,16 @@ final class AVPlayerEngine: PlaybackEngine {
 
         // The window kept sliding for the whole time the picture was on the
         // television, so the position is almost certainly behind it now. Clear
-        // the cooldown so the next tick may correct immediately rather than
-        // waiting out an interval that was meant for repeated failures.
+        // the cooldowns so the next tick may correct immediately rather than
+        // waiting out intervals meant for repeated failures.
+        //
+        // `lastRecoveryAt` included: a route change is a legitimate, user-caused
+        // reason to rebuild, not the runaway reconnecting that bound is there to
+        // prevent. Reattaching and resuming is tried first and costs nothing; if
+        // it does not take, the stall watchdog rebuilds ten seconds later.
+        lastRecoveryAt = nil
+        stalledTicks = 0
+        stalledPosition = nil
         lastCatchUpAt = nil
         positionAtLastCatchUp = nil
     }
@@ -562,6 +570,8 @@ final class AVPlayerEngine: PlaybackEngine {
         watchTicks = 0
         lastCatchUpAt = nil
         positionAtLastCatchUp = nil
+        stalledTicks = 0
+        stalledPosition = nil
         // Once a second. The threshold is 8s, so a finer interval buys nothing
         // and a coarser one lets the gap grow while we are not looking.
         liveEdgeObserver = player.addPeriodicTimeObserver(
@@ -575,10 +585,48 @@ final class AVPlayerEngine: PlaybackEngine {
                 if self.watchTicks % 2 == 0, (self.snapshot.width ?? 0) == 0 {
                     self.logDiagnostics(reason: "connecting")
                 }
+                self.checkForStall()
                 self.catchUpToLiveEdge()
             }
         }
     }
+
+    /// Rebuilds the stream when the player has been waiting for data that is
+    /// not coming.
+    ///
+    /// The state this exists for: `timeControlStatus` stuck at
+    /// `.waitingToPlayAtSpecifiedRate` with the position frozen. Reported as
+    /// loading forever on returning from AirPlay — the receiver had been
+    /// consuming the stream, so the local player resumed at a position the
+    /// window discarded long ago, and with no seekable range to jump to there
+    /// was nothing for the catch-up to correct.
+    private func checkForStall() {
+        guard let item = player.currentItem, item.status == .readyToPlay else {
+            stalledTicks = 0
+            return
+        }
+        // Waiting *and* not moving. Either alone is normal: a healthy stream
+        // waits briefly at a rebuffer, and a paused one does not move.
+        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let position = CMTimeGetSeconds(item.currentTime())
+        let frozen = stalledPosition.map { abs(position - $0) < 0.01 } ?? false
+
+        guard waiting, frozen else {
+            stalledTicks = 0
+            stalledPosition = position.isFinite ? position : nil
+            return
+        }
+
+        stalledTicks += 1
+        guard stalledTicks >= Self.stallLimit else { return }
+
+        Self.log.error("waiting for data for \(Self.stallLimit, privacy: .public)s with no movement")
+        logDiagnostics(reason: "stalled")
+        stalledTicks = 0
+        recoverWedgedStream()
+    }
+
+    @ObservationIgnored private var stalledPosition: TimeInterval?
 
     /// Rebuilds the stream from the upstream URL.
     ///
@@ -620,6 +668,20 @@ final class AVPlayerEngine: PlaybackEngine {
     /// `96.25…107.73` to `135.15…146.64` — forty seconds — while `currentTime()`
     /// stayed pinned at 100.26 across eight consecutive corrections.
     @ObservationIgnored private var positionAtLastCatchUp: TimeInterval?
+
+    /// Consecutive one-second ticks spent waiting for data that never comes.
+    ///
+    /// **Deliberately blind to the cause.** The route-end handler below covers
+    /// AirPlay specifically, but it depends on a KVO firing, and the same dead
+    /// end is reachable other ways — a window that slid past the position while
+    /// something else held the player, a seek that landed nowhere. Counting
+    /// "wants to play, has nothing, is not moving" catches all of them with one
+    /// rule, and needs no theory about which one happened.
+    @ObservationIgnored private var stalledTicks = 0
+
+    /// How long to let that run before rebuilding. Ten seconds is well past any
+    /// honest rebuffer on a local server and well short of a viewer giving up.
+    private static let stallLimit = 10
 
     /// When the stream was last rebuilt because seeking could not revive it.
     @ObservationIgnored private var lastRecoveryAt: ContinuousClock.Instant?

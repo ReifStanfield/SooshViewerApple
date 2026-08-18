@@ -222,6 +222,13 @@ no decoder.
   still loading — and pressing it would have stopped the playback that was about
   to start. `AVPlayerEngine.isBuffering` is the third state; the controls show a
   spinner for it.
+- **A stall watchdog backs all of this up, and is deliberately blind to the
+  cause.** "Wants to play, has nothing, position not moving, for ten seconds"
+  rebuilds the stream. The route-end handler covers AirPlay specifically but
+  depends on a KVO firing, and the same dead end is reachable other ways — the
+  window sliding past the position while something else held the player, a seek
+  that landed nowhere. One rule catches all of them and needs no theory about
+  which happened.
 - **An ended AirPlay route leaves the local layer without a picture.** The layer
   is not reliably re-acquired, so the fix is to set `layer.player` again on the
   transition — **and to call `play()`, because the route also ends paused and
@@ -343,6 +350,7 @@ by deleting the suspect:**
 | Repeated jumps, position never moves | Player wedged, not lagging — seeking cannot fix it |
 | Black frame after AirPlay returns | Layer never re-acquired the player, and nothing resumed it |
 | Play button shown while still loading | `timeControlStatus` has three states, not two |
+| Loads forever after AirPlay returns | Resumed at a position the window had discarded |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning
