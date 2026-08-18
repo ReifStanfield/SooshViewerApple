@@ -222,6 +222,17 @@ no decoder.
   still loading — and pressing it would have stopped the playback that was about
   to start. `AVPlayerEngine.isBuffering` is the third state; the controls show a
   spinner for it.
+- **"It plays unless you paused it" is a single rule, not each recovery path
+  remembering to resume.** Several things leave the rate at zero — an external
+  route ending, a seek completing oddly, an item swap — so `playOrPause` records
+  intent and the wall-clock tick restarts anything that stopped without being
+  asked. Test `rate`, not `timeControlStatus`: rate is the *requested* rate and
+  stays 1 while merely waiting for data, so zero means something really stopped.
+- **A catch-up seek resumes unconditionally.** It used to resume only if the
+  player was already `.playing`, which is the same two-states-not-three mistake:
+  a correction made while buffering left the stream stopped, needing a manual
+  play. A deliberate pause is excluded earlier, so by the time a seek is issued
+  every remaining state means the viewer wants playback.
 - **The watchdog runs on a wall clock, never on `addPeriodicTimeObserver`.**
   That observer fires on *playback time* advancing, so it falls silent exactly
   when playback stops — which is the only moment any of this matters. It
@@ -362,6 +373,7 @@ by deleting the suspect:**
 | Black frame after AirPlay returns | Layer never re-acquired the player, and nothing resumed it |
 | Play button shown while still loading | `timeControlStatus` has three states, not two |
 | Loads forever after AirPlay returns | Resumed at a position the window had discarded |
+| Recovers but sits paused | A correction that resumed only if already `.playing` |
 
 **Reach for instrumentation early.** `xcrun simctl launch --console-pty` plus a
 periodic dump of real state settled in one run what three rounds of reasoning

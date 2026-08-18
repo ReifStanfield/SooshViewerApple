@@ -594,6 +594,7 @@ final class AVPlayerEngine: PlaybackEngine {
         stalledTicks = 0
         stalledPosition = nil
         hasBeenReady = false
+        userPaused = false
         isExternalRoute = player.isExternalPlaybackActive
         // **A wall clock, not `addPeriodicTimeObserver`.**
         //
@@ -616,6 +617,7 @@ final class AVPlayerEngine: PlaybackEngine {
                 if watchTicks % 2 == 0, (snapshot.width ?? 0) == 0 {
                     logDiagnostics(reason: "connecting")
                 }
+                resumeIfStoppedUnexpectedly()
                 checkForStall()
                 catchUpToLiveEdge()
             }
@@ -813,16 +815,23 @@ final class AVPlayerEngine: PlaybackEngine {
 
         lastCatchUpAt = attemptedAt
         positionAtLastCatchUp = now
-        let wasPlaying = player.timeControlStatus == .playing
 
         player.seek(
             to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .positiveInfinity,
             toleranceAfter: .zero
         ) { [weak self] finished in
-            // Only resume what was already running. Calling `play()`
-            // unconditionally turns a correction into a command.
-            guard finished, wasPlaying else { return }
+            // **Resume unconditionally, because a deliberate pause was already
+            // excluded above.** By the time a seek is issued, `timeControlStatus`
+            // is either `.playing` or `.waitingToPlayAtSpecifiedRate` — the
+            // `.paused` case returned long before this point. Both of the
+            // remaining states mean the viewer wants playback.
+            //
+            // This used to test for `.playing` specifically, which is the same
+            // mistake as reading `timeControlStatus` as two states: a correction
+            // made while the stream was still buffering left it stopped, needing
+            // a manual play. Coming back from AirPlay is exactly that case.
+            guard finished else { return }
             MainActor.assumeIsolated { self?.player.play() }
         }
     }
@@ -872,10 +881,37 @@ final class AVPlayerEngine: PlaybackEngine {
 
     func playOrPause() {
         if player.timeControlStatus == .playing {
+            // Recorded so the watchdog below can tell a pause the viewer asked
+            // for from one the pipeline inflicted. Without the distinction it
+            // can only choose between overriding deliberate pauses and leaving
+            // the stream stopped after a recovery — and it has done both.
+            userPaused = true
             player.pause()
         } else {
+            userPaused = false
             player.play()
         }
+    }
+
+    /// Whether playback is stopped because the viewer stopped it.
+    @ObservationIgnored private var userPaused = false
+
+    /// Restarts playback that stopped without anyone asking.
+    ///
+    /// **The guarantee is "it plays unless you paused it", not "the recovery
+    /// path remembered to resume".** Several things can leave the rate at zero —
+    /// an external route ending, a seek completing oddly, an item swap — and
+    /// making each one responsible for restarting playback means a new one
+    /// arrives every few weeks. One rule on the wall-clock tick covers them all.
+    ///
+    /// `rate` rather than `timeControlStatus`: rate is the *requested* rate, so
+    /// it stays 1 while the player is merely waiting for data. Zero means
+    /// something actually stopped.
+    private func resumeIfStoppedUnexpectedly() {
+        guard let item = player.currentItem, item.status == .readyToPlay else { return }
+        guard !userPaused, !player.isExternalPlaybackActive, player.rate == 0 else { return }
+        Self.log.notice("playback stopped without being asked to, resuming")
+        player.play()
     }
 
     // MARK: - Picture in Picture
